@@ -1,0 +1,121 @@
+/* Additional custom styles for RFID Access Control System */
+
+/* Custom scrollbar for containers */
+.scan-container::-webkit-scrollbar,
+.image-container::-webkit-scrollbar {
+    width: 6px;
+}
+
+.scan-container::-webkit-scrollbar-track,
+.image-container::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 3px;
+}
+
+.scan-container::-webkit-scrollbar-thumb,
+.image-container::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 3px;
+}
+
+.scan-container::-webkit-scrollbar-thumb:hover,
+.image-container::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
+/* Animation for refresh button */
+.refresh-btn {
+    transition: transform 0.3s ease;
+}
+
+.refresh-btn:hover {
+    transform: scale(1.1);
+}
+
+.refresh-btn:active {
+    transform: scale(0.95);
+}
+
+/* Pulse animation for status indicator */
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.5; }
+    100% { opacity: 1; }
+}
+
+.status-pulse {
+    animation: pulse 2s infinite;
+}
+
+/* Hover effects for image items */
+.image-item {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.image-item:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+/* Loading spinner */
+.loading-spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 3px solid #f3f3f3;
+    border-top: 3px solid #3498db;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Status badges */
+.status-badge {
+    font-size: 0.75rem;
+    padding: 0.25rem 0.5rem;
+}
+
+/* Card hover effects */
+.scan-card {
+    transition: all 0.2s ease;
+}
+
+.scan-card:hover {
+    transform: translateX(5px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .image-grid {
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 10px;
+    }
+    
+    .stats-card h3 {
+        font-size: 1.5rem;
+    }
+    
+    .refresh-btn {
+        bottom: 10px;
+        right: 10px;
+        width: 50px;
+        height: 50px;
+    }
+}
+
+/* Dark mode support (if needed) */
+@media (prefers-color-scheme: dark) {
+    .card {
+        background-color: #2d3748;
+        border-color: #4a5568;
+    }
+    
+    .text-muted {
+        color: #a0aec0 !important;
+    }
+}

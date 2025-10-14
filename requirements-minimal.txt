@@ -1,0 +1,38 @@
+# MaxPark RFID Access Control System - Essential Dependencies Only
+# Core web framework
+Flask==2.3.3
+Werkzeug==2.3.7
+
+# Raspberry Pi GPIO control
+RPi.GPIO==0.7.1
+pigpio==1.78
+
+# Computer vision and image processing
+opencv-python==4.8.1.78
+
+# Firebase integration
+firebase-admin==6.2.0
+google-api-core==2.11.1
+google-cloud-firestore==2.11.1
+
+# HTTP requests and API communication
+requests==2.31.0
+urllib3==2.0.7
+
+# Environment variable management
+python-dotenv==1.0.0
+
+# Date and time handling
+python-dateutil==2.8.2
+
+# Type hints support
+typing-extensions==4.8.0
+
+# Additional security and cryptography
+cryptography==41.0.7
+
+# Image processing and manipulation
+Pillow==10.0.1
+
+# System monitoring and process management
+psutil==5.9.6

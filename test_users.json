@@ -1,0 +1,20 @@
+{
+    "123456789": {
+        "id": "user001",
+        "ref_id": "EMP001",
+        "name": "John Doe",
+        "card_number": "123456789"
+    },
+    "987654321": {
+        "id": "user002", 
+        "ref_id": "EMP002",
+        "name": "Jane Smith",
+        "card_number": "987654321"
+    },
+    "555666777": {
+        "id": "user003",
+        "ref_id": "EMP003", 
+        "name": "Bob Johnson",
+        "card_number": "555666777"
+    }
+}
