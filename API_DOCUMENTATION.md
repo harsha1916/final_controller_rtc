@@ -211,6 +211,38 @@ http://your-raspberry-pi-ip:5001
   }
   ```
 
+### 12. Get Entity Configuration
+- **URL**: `GET /get_entity_config`
+- **Description**: Get current entity configuration
+- **Authentication**: None
+- **Response**:
+  ```json
+  {
+    "status": "success",
+    "entity_id": "your_entity_id",
+    "config_file_exists": true
+  }
+  ```
+
+### 13. Save Entity Configuration
+- **URL**: `POST /save_entity_config`
+- **Description**: Save entity configuration
+- **Authentication**: API Key required
+- **Request Body**:
+  ```json
+  {
+    "entity_id": "your_entity_id"
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "status": "success",
+    "message": "Entity ID updated to: your_entity_id",
+    "entity_id": "your_entity_id"
+  }
+  ```
+
 ---
 
 ## User Management APIs

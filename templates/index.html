@@ -781,7 +781,15 @@
                                 <div class="col-md-3">
                                     <div class="mb-3">
                                         <label for="entityId" class="form-label">Entity ID</label>
-                                        <input type="text" class="form-control" id="entityId" placeholder="default_entity">
+                                        <input type="text" class="form-control" id="entityId" placeholder="default_entity" 
+                                               pattern="[a-zA-Z0-9_-]+" minlength="3" maxlength="50"
+                                               title="Entity ID can only contain letters, numbers, underscores, and hyphens (3-50 characters)">
+                                        <div class="form-text">
+                                            <small class="text-muted">
+                                                <i class="fas fa-info-circle"></i> 
+                                                Identifies your organization in the database
+                                            </small>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -803,9 +811,12 @@
                                 <button class="btn btn-sm btn-outline-info me-2" onclick="checkRTCStatus()">
                                     <i class="fas fa-info-circle"></i> Check Status
                                 </button>
-                                <button class="btn btn-sm btn-outline-primary" onclick="syncTimeWithRTC()">
-                                    <i class="fas fa-sync"></i> Sync Time
-                                </button>
+                            <button class="btn btn-sm btn-outline-primary" onclick="syncTimeWithRTC()">
+                                <i class="fas fa-sync"></i> Sync Time
+                            </button>
+                            <button class="btn btn-sm btn-outline-warning ms-2" onclick="debugRTC()">
+                                <i class="fas fa-bug"></i> Debug RTC
+                            </button>
                             </div>
                         </div>
                         <div class="card-body">
@@ -850,6 +861,7 @@
                     </div>
                 </div>
             </div>
+
 
             <!-- Wiegand Configuration -->
             <div class="row mt-4">
@@ -1609,6 +1621,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
         let refreshInterval;
+        let transactionRefreshInterval;
         let isRefreshing = false;
 
         // Initialize the interface
@@ -1617,6 +1630,9 @@
             // Auto-refresh every 5 seconds
             refreshInterval = setInterval(refreshData, 5000);
             
+            // Faster refresh for transactions (every 2 seconds)
+            transactionRefreshInterval = setInterval(fetchAndDisplayScans, 2000);
+            
             // Initialize form handlers
             initializeFormHandlers();
             
@@ -1624,11 +1640,10 @@
             loadConfiguration();
         });
 
-        // Cleanup on page unload
+        // Cleanup intervals when page is unloaded
         window.addEventListener('beforeunload', function() {
-            if (refreshInterval) {
-                clearInterval(refreshInterval);
-            }
+            if (refreshInterval) clearInterval(refreshInterval);
+            if (transactionRefreshInterval) clearInterval(transactionRefreshInterval);
         });
 
         async function refreshData() {
@@ -1671,11 +1686,20 @@
 
         async function fetchAndDisplayScans() {
             try {
-                const response = await fetch('/get_transactions');
-                const scans = await response.json();
+                // Use the new real-time endpoint for faster updates
+                const response = await fetch('/get_recent_transactions');
+                const result = await response.json();
                 
-                displayScans(scans);
-                updateScanStats(scans);
+                if (result.status === 'success' && result.transactions.length > 0) {
+                    displayScans(result.transactions);
+                    updateScanStats(result.transactions);
+                } else {
+                    // Fallback to regular endpoint if no recent transactions
+                    const fallbackResponse = await fetch('/get_transactions');
+                    const scans = await fallbackResponse.json();
+                    displayScans(scans);
+                    updateScanStats(scans);
+                }
                 
             } catch (error) {
                 console.error('Error fetching scans:', error);
@@ -1957,14 +1981,17 @@
 
             try {
                 const params = new URLSearchParams({
-                    api_key: getApiKey(),
                     card_number: cardNumber,
                     id: userId,
                     name: name,
                     ref_id: refId
                 });
 
-                const response = await fetch(`/add_user?${params}`);
+                const response = await fetch(`/add_user?${params}`, {
+                    headers: {
+                        'X-API-Key': getApiKey()
+                    }
+                });
                 const result = await response.json();
 
                 if (result.status === 'success') {
@@ -1989,11 +2016,14 @@
 
             try {
                 const params = new URLSearchParams({
-                    api_key: getApiKey(),
                     card_number: cardNumber
                 });
 
-                const response = await fetch(`/delete_user?${params}`);
+                const response = await fetch(`/delete_user?${params}`, {
+                    headers: {
+                        'X-API-Key': getApiKey()
+                    }
+                });
                 const result = await response.json();
 
                 if (result.status === 'success') {
@@ -2018,11 +2048,14 @@
 
             try {
                 const params = new URLSearchParams({
-                    api_key: getApiKey(),
                     card_number: cardNumber
                 });
 
-                const response = await fetch(`/block_user?${params}`);
+                const response = await fetch(`/block_user?${params}`, {
+                    headers: {
+                        'X-API-Key': getApiKey()
+                    }
+                });
                 const result = await response.json();
 
                 if (result.status === 'success') {
@@ -2047,11 +2080,14 @@
 
             try {
                 const params = new URLSearchParams({
-                    api_key: getApiKey(),
                     card_number: cardNumber
                 });
 
-                const response = await fetch(`/unblock_user?${params}`);
+                const response = await fetch(`/unblock_user?${params}`, {
+                    headers: {
+                        'X-API-Key': getApiKey()
+                    }
+                });
                 const result = await response.json();
 
                 if (result.status === 'success') {
@@ -2664,8 +2700,23 @@
                 document.getElementById('bindPort').value = config.bind_port || 9000;
                 document.getElementById('apiKey').value = config.api_key || '';
                 document.getElementById('scanDelaySeconds').value = config.scan_delay_seconds || 60;
-                if (document.getElementById('entityId')) {
-                    document.getElementById('entityId').value = config.entity_id || 'default_entity';
+                
+                // Load entity ID from the new API
+                try {
+                    const entityResponse = await fetch('/get_entity_config', {
+                        headers: {
+                            'X-API-Key': getApiKey()
+                        }
+                    });
+                    const entityResult = await entityResponse.json();
+                    if (entityResult.status === 'success' && document.getElementById('entityId')) {
+                        document.getElementById('entityId').value = entityResult.entity_id;
+                    }
+                } catch (error) {
+                    // Fallback to config.entity_id if API fails
+                    if (document.getElementById('entityId')) {
+                        document.getElementById('entityId').value = config.entity_id || 'default_entity';
+                    }
                 }
                 
                 // Load RTC configuration
@@ -2812,11 +2863,11 @@
                 bind_ip: document.getElementById('bindIp').value,
                 bind_port: parseInt(document.getElementById('bindPort').value),
                 api_key: document.getElementById('apiKey').value,
-                scan_delay_seconds: parseInt(document.getElementById('scanDelaySeconds').value),
-                entity_id: document.getElementById('entityId').value
+                scan_delay_seconds: parseInt(document.getElementById('scanDelaySeconds').value)
             };
 
             try {
+                // Save system configuration (without entity_id)
                 const response = await fetch('/update_config', {
                     method: 'POST',
                     headers: {
@@ -2828,7 +2879,33 @@
 
                 const result = await response.json();
                 if (result.status === 'success') {
-                    showNotification('System configuration updated! Restart required.', 'success');
+                    // Save entity_id separately using the new API
+                    const entityId = document.getElementById('entityId').value.trim();
+                    if (entityId) {
+                        try {
+                            const entityResponse = await fetch('/save_entity_config', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-API-Key': getApiKey()
+                                },
+                                body: JSON.stringify({
+                                    entity_id: entityId
+                                })
+                            });
+                            
+                            const entityResult = await entityResponse.json();
+                            if (entityResult.status === 'success') {
+                                showNotification('System configuration and Entity ID saved successfully!', 'success');
+                            } else {
+                                showNotification(`System config saved, but Entity ID error: ${entityResult.message}`, 'warning');
+                            }
+                        } catch (entityError) {
+                            showNotification(`System config saved, but Entity ID error: ${entityError.message}`, 'warning');
+                        }
+                    } else {
+                        showNotification('System configuration saved successfully!', 'success');
+                    }
                 } else {
                     showNotification(`Error: ${result.message}`, 'danger');
                 }
@@ -2939,6 +3016,56 @@
                 showNotification(`Error updating RTC config: ${error.message}`, 'danger');
             }
         }
+
+        async function debugRTC() {
+            try {
+                const response = await fetch('/rtc_debug', {
+                    headers: {
+                        'X-API-Key': getApiKey()
+                    }
+                });
+                
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    // Show debug information in a modal or alert
+                    const debugInfo = result.debug_info;
+                    let debugText = `RTC Debug Information:\n\n`;
+                    debugText += `RTC Status:\n`;
+                    debugText += `- Enabled: ${debugInfo.rtc_status.rtc_enabled}\n`;
+                    debugText += `- Available: ${debugInfo.rtc_status.rtc_available}\n`;
+                    debugText += `- Time Source: ${debugInfo.rtc_status.time_source}\n`;
+                    debugText += `- I2C Bus: ${debugInfo.rtc_status.i2c_bus}\n`;
+                    debugText += `- I2C Address: ${debugInfo.rtc_status.i2c_address}\n\n`;
+                    
+                    debugText += `Environment Variables:\n`;
+                    debugText += `- RTC_ENABLED: ${debugInfo.environment_vars.RTC_ENABLED}\n`;
+                    debugText += `- RTC_I2C_BUS: ${debugInfo.environment_vars.RTC_I2C_BUS}\n`;
+                    debugText += `- RTC_I2C_ADDRESS: ${debugInfo.environment_vars.RTC_I2C_ADDRESS}\n\n`;
+                    
+                    if (debugInfo.i2cdetect_output) {
+                        debugText += `i2cdetect Output:\n`;
+                        debugText += `- Return Code: ${debugInfo.i2cdetect_output.returncode}\n`;
+                        debugText += `- Output: ${debugInfo.i2cdetect_output.stdout}\n`;
+                        if (debugInfo.i2cdetect_output.stderr) {
+                            debugText += `- Error: ${debugInfo.i2cdetect_output.stderr}\n`;
+                        }
+                    }
+                    
+                    if (debugInfo.i2cdetect_error) {
+                        debugText += `i2cdetect Error: ${debugInfo.i2cdetect_error}\n`;
+                    }
+                    
+                    // Show in a modal or alert
+                    alert(debugText);
+                } else {
+                    showNotification(`RTC Debug Error: ${result.message}`, 'danger');
+                }
+            } catch (error) {
+                showNotification(`Error debugging RTC: ${error.message}`, 'danger');
+            }
+        }
+
 
         async function saveWiegandConfig() {
             const config = {

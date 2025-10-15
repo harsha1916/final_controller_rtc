@@ -64,18 +64,24 @@ class DS3232RTC:
                 timeout=5
             )
             
+            self.logger.info(f"i2cdetect output: {result.stdout}")
+            self.logger.info(f"i2cdetect stderr: {result.stderr}")
+            self.logger.info(f"Looking for address: {self.i2c_address:02x}")
+            
             if result.returncode == 0:
                 # Check if our address (0x68) is present in the output
-                return f"{self.i2c_address:02x}" in result.stdout.lower()
+                address_found = f"{self.i2c_address:02x}" in result.stdout.lower()
+                self.logger.info(f"RTC address {self.i2c_address:02x} found: {address_found}")
+                return address_found
             else:
-                self.logger.error(f"i2cdetect failed: {result.stderr}")
+                self.logger.error(f"i2cdetect failed with return code {result.returncode}: {result.stderr}")
                 return False
                 
         except subprocess.TimeoutExpired:
             self.logger.error("i2cdetect timeout")
             return False
         except FileNotFoundError:
-            self.logger.error("i2cdetect not found. Install i2c-tools: sudo apt install i2c-tools")
+            self.logger.error("i2cdetect command not found. Make sure i2c-tools is installed.")
             return False
         except Exception as e:
             self.logger.error(f"Error checking RTC presence: {e}")

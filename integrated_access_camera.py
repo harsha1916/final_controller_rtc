@@ -65,8 +65,34 @@ USER_DATA_FILE = os.path.join(BASE_DIR, "users.json")
 BLOCKED_USERS_FILE = os.path.join(BASE_DIR, "blocked_users.json")
 TRANSACTION_CACHE_FILE = os.path.join(BASE_DIR, "transactions_cache.json")
 DAILY_STATS_FILE = os.path.join(BASE_DIR, "daily_stats.json")
+ENTITY_CONFIG_FILE = os.path.join(BASE_DIR, "entity_config.json")
 FIREBASE_CRED_FILE = os.environ.get('FIREBASE_CRED_FILE', "service.json")
-ENTITY_ID = os.environ.get('ENTITY_ID', 'default_entity')
+
+# Load entity_id from config file or environment variable
+def get_entity_id():
+    """Get entity_id from config file or environment variable."""
+    try:
+        if os.path.exists(ENTITY_CONFIG_FILE):
+            config = read_json_or_default(ENTITY_CONFIG_FILE, {})
+            return config.get('entity_id', os.environ.get('ENTITY_ID', 'default_entity'))
+        else:
+            return os.environ.get('ENTITY_ID', 'default_entity')
+    except Exception as e:
+        logging.error(f"Error loading entity_id: {e}")
+        return os.environ.get('ENTITY_ID', 'default_entity')
+
+def save_entity_id(entity_id):
+    """Save entity_id to config file."""
+    try:
+        config = {"entity_id": entity_id}
+        atomic_write_json(ENTITY_CONFIG_FILE, config)
+        logging.info(f"Entity ID saved: {entity_id}")
+        return True
+    except Exception as e:
+        logging.error(f"Error saving entity_id: {e}")
+        return False
+
+ENTITY_ID = get_entity_id()
 
 # Ensure base directory exists
 os.makedirs(BASE_DIR, exist_ok=True)
@@ -1299,9 +1325,27 @@ def relay():
 # --- Transactions ---
 @app.route("/get_transactions", methods=["GET"])
 def get_transactions():
-    """Fetch the latest RFID access transactions from Firebase or local cache."""
+    """Fetch the latest RFID access transactions from Firebase, local cache, and recent memory."""
     try:
         transactions = []
+        
+        # First, add recent transactions from memory (most recent)
+        if recent_transactions:
+            for tx in reversed(recent_transactions[-10:]):  # Get last 10, most recent first
+                transactions.append({
+                    "card_number": tx.get("card", "N/A"),
+                    "name": tx.get("name", "Unknown"),
+                    "status": tx.get("status", "Unknown"),
+                    "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
+                    "reader": tx.get("reader", "Unknown"),
+                    "source": "recent_memory"
+                })
+        
+        # If we have recent transactions, return them immediately for real-time display
+        if transactions:
+            return jsonify(transactions)
+        
+        # If no recent transactions, try Firestore
         if db is not None and is_internet_available():
             try:
                 # Read transactions with entity_id filter
@@ -1323,7 +1367,8 @@ def get_transactions():
                     "name": tx.get("name", "Unknown"),
                     "status": tx.get("status", "Unknown"),
                     "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
-                    "reader": tx.get("reader", "Unknown")
+                    "reader": tx.get("reader", "Unknown"),
+                    "source": "firestore"
                 })
 
             if transactions:
@@ -1332,10 +1377,143 @@ def get_transactions():
         # Offline (or no DB): serve cached if available
         cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
         if cached:
-            return jsonify(cached[-10:])
+            for tx in cached[-10:]:
+                transactions.append({
+                    "card_number": tx.get("card", "N/A"),
+                    "name": tx.get("name", "Unknown"),
+                    "status": tx.get("status", "Unknown"),
+                    "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
+                    "reader": tx.get("reader", "Unknown"),
+                    "source": "cache"
+                })
+            return jsonify(transactions)
+            
         return jsonify([{"message": "No recent transactions"}])
     except Exception as e:
         return jsonify({"status": "error", "message": f"Error fetching transactions: {str(e)}"}), 500
+
+@app.route("/get_recent_transactions", methods=["GET"])
+def get_recent_transactions():
+    """Get only the most recent transactions from memory for real-time display."""
+    try:
+        transactions = []
+        
+        # Get recent transactions from memory (most recent first)
+        if recent_transactions:
+            for tx in reversed(recent_transactions[-5:]):  # Get last 5 for real-time display
+                transactions.append({
+                    "card_number": tx.get("card", "N/A"),
+                    "name": tx.get("name", "Unknown"),
+                    "status": tx.get("status", "Unknown"),
+                    "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
+                    "reader": tx.get("reader", "Unknown"),
+                    "source": "recent_memory"
+                })
+        
+        return jsonify({
+            "status": "success",
+            "transactions": transactions,
+            "count": len(transactions)
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error fetching recent transactions: {str(e)}"}), 500
+
+# --- Entity Configuration ---
+@app.route("/get_entity_config", methods=["GET"])
+@require_api_key
+def get_entity_config():
+    """Get current entity configuration."""
+    try:
+        return jsonify({
+            "status": "success",
+            "entity_id": get_entity_id(),
+            "config_file_exists": os.path.exists(ENTITY_CONFIG_FILE)
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error getting entity config: {str(e)}"}), 500
+
+@app.route("/rtc_debug", methods=["GET"])
+@require_api_key
+def rtc_debug():
+    """Debug RTC module status and configuration."""
+    try:
+        rtc = get_rtc_instance()
+        rtc_status = rtc.get_rtc_status()
+        
+        # Add additional debug information
+        debug_info = {
+            "rtc_status": rtc_status,
+            "environment_vars": {
+                "RTC_ENABLED": os.environ.get('RTC_ENABLED', 'not_set'),
+                "RTC_I2C_BUS": os.environ.get('RTC_I2C_BUS', 'not_set'),
+                "RTC_I2C_ADDRESS": os.environ.get('RTC_I2C_ADDRESS', 'not_set')
+            },
+            "config_values": {
+                "RTC_ENABLED": RTC_ENABLED,
+                "RTC_I2C_BUS": RTC_I2C_BUS,
+                "RTC_I2C_ADDRESS": hex(RTC_I2C_ADDRESS)
+            }
+        }
+        
+        # Try to run i2cdetect manually for debugging
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['i2cdetect', '-y', str(RTC_I2C_BUS)],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            debug_info["i2cdetect_output"] = {
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr
+            }
+        except Exception as e:
+            debug_info["i2cdetect_error"] = str(e)
+        
+        return jsonify({
+            "status": "success",
+            "debug_info": debug_info
+        })
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error getting RTC debug info: {str(e)}"}), 500
+
+@app.route("/save_entity_config", methods=["POST"])
+@require_api_key
+def save_entity_config():
+    """Save entity configuration."""
+    try:
+        data = request.get_json()
+        entity_id = data.get("entity_id", "").strip()
+        
+        if not entity_id:
+            return jsonify({"status": "error", "message": "Entity ID is required"}), 400
+        
+        # Validate entity_id format (alphanumeric, underscore, hyphen only)
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', entity_id):
+            return jsonify({"status": "error", "message": "Entity ID can only contain letters, numbers, underscores, and hyphens"}), 400
+        
+        if len(entity_id) < 3 or len(entity_id) > 50:
+            return jsonify({"status": "error", "message": "Entity ID must be between 3 and 50 characters"}), 400
+        
+        if save_entity_id(entity_id):
+            # Update global ENTITY_ID
+            global ENTITY_ID
+            ENTITY_ID = entity_id
+            
+            return jsonify({
+                "status": "success", 
+                "message": f"Entity ID updated to: {entity_id}",
+                "entity_id": entity_id
+            })
+        else:
+            return jsonify({"status": "error", "message": "Failed to save entity configuration"}), 500
+            
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error saving entity config: {str(e)}"}), 500
 
 # --- User Analytics ---
 @app.route("/get_today_stats", methods=["GET"])
@@ -1356,11 +1534,11 @@ def get_today_stats():
                 start_of_day = int(get_accurate_datetime().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
                 end_of_day = int(get_accurate_datetime().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp())
                 
-                docs_iter = db.collection("entities").document(ENTITY_ID) \
-                              .collection("transactions") \
+                docs_iter = db.collection("transactions") \
+                              .where("entity_id", "==", ENTITY_ID) \
                               .where(filter=FieldFilter("timestamp", ">=", start_of_day)) \
                               .where(filter=FieldFilter("timestamp", "<=", end_of_day)) \
-                              .stream()
+                              .order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
                 
                 for doc in docs_iter:
                     tx = doc.to_dict() or {}
@@ -1440,8 +1618,8 @@ def search_user_transactions():
         if db is not None and is_internet_available():
             try:
                 # Get all transactions and filter by name (since Firestore doesn't support substring search well)
-                query = db.collection("entities").document(ENTITY_ID) \
-                          .collection("transactions") \
+                query = db.collection("transactions") \
+                          .where("entity_id", "==", ENTITY_ID) \
                           .order_by("timestamp", direction=firestore.Query.DESCENDING) \
                           .limit(500)  # Get more to allow for filtering
                 
@@ -1517,8 +1695,8 @@ def test_user_search():
         # Get a sample transaction for testing
         if db is not None and is_internet_available():
             try:
-                docs_iter = db.collection("entities").document(ENTITY_ID) \
-                              .collection("transactions") \
+                docs_iter = db.collection("transactions") \
+                              .where("entity_id", "==", ENTITY_ID) \
                               .order_by("timestamp", direction=firestore.Query.DESCENDING) \
                               .limit(5).stream()
                 
@@ -2801,6 +2979,9 @@ def health_check():
         # Get RTC status
         rtc = get_rtc_instance()
         rtc_status = rtc.get_rtc_status()
+        
+        # Debug logging for RTC status
+        logging.info(f"RTC Health Check - Enabled: {rtc_status.get('rtc_enabled')}, Available: {rtc_status.get('rtc_available')}, Time Source: {rtc_status.get('time_source')}")
         
         # Get Raspberry Pi temperature
         temperature_info = get_raspberry_pi_temperature()
