@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # Use your config/uploader modules (RTSP cameras, retry configs, S3 API)
 # (These come from your uploaded files.)
-from config import RTSP_CAMERAS, MAX_RETRIES, RETRY_DELAY  # :contentReference[oaicite:3]{index=3}
+from config import RTSP_CAMERAS, MAX_RETRIES, RETRY_DELAY, RTC_ENABLED, RTC_I2C_BUS, RTC_I2C_ADDRESS  # :contentReference[oaicite:3]{index=3}
 from uploader import ImageUploader  # :contentReference[oaicite:4]{index=4}
 
 # DS3232 RTC module for accurate timestamps
@@ -66,6 +66,7 @@ BLOCKED_USERS_FILE = os.path.join(BASE_DIR, "blocked_users.json")
 TRANSACTION_CACHE_FILE = os.path.join(BASE_DIR, "transactions_cache.json")
 DAILY_STATS_FILE = os.path.join(BASE_DIR, "daily_stats.json")
 ENTITY_CONFIG_FILE = os.path.join(BASE_DIR, "entity_config.json")
+TRANSACTION_RETENTION_DAYS = int(os.environ.get('TRANSACTION_RETENTION_DAYS', '120'))  # Keep transactions for 120 days
 FIREBASE_CRED_FILE = os.environ.get('FIREBASE_CRED_FILE', "service.json")
 
 # Load entity_id from config file or environment variable
@@ -147,6 +148,16 @@ def daily_stats_cleanup_worker():
             time.sleep(86400)  # Check every 24 hours
         except Exception as e:
             logging.error(f"Daily stats cleanup error: {e}")
+            time.sleep(3600)  # Retry in 1 hour on error
+
+def transaction_cleanup_worker():
+    """Background worker to clean up transactions older than TRANSACTION_RETENTION_DAYS"""
+    while True:
+        try:
+            cleanup_old_transactions()
+            time.sleep(86400)  # Check every 24 hours
+        except Exception as e:
+            logging.error(f"Transaction cleanup error: {e}")
             time.sleep(3600)  # Retry in 1 hour on error
 
 def hash_password(password):
@@ -435,10 +446,54 @@ def save_blocked_users(new_blocked):
         _rebuild_blocked_set_from_dict(blocked_users)
 
 def cache_transaction(transaction):
-    """Stores transactions locally when internet is unavailable."""
+    """
+    Stores transactions locally for fast access.
+    This is ALWAYS called regardless of internet status for better performance.
+    """
     txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
     txns.append(transaction)
     atomic_write_json(TRANSACTION_CACHE_FILE, txns)
+    logging.info(f"Transaction cached locally: {transaction.get('card', 'unknown')}")
+
+def cleanup_old_transactions():
+    """
+    Clean up transactions older than TRANSACTION_RETENTION_DAYS from local cache.
+    This keeps the local storage manageable and performant.
+    """
+    try:
+        if not os.path.exists(TRANSACTION_CACHE_FILE):
+            logging.info("No transaction cache file to clean")
+            return 0
+        
+        txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
+        if not txns:
+            logging.info("No transactions to clean")
+            return 0
+        
+        # Calculate cutoff timestamp
+        cutoff_date = get_accurate_datetime() - timedelta(days=TRANSACTION_RETENTION_DAYS)
+        cutoff_timestamp = int(cutoff_date.timestamp())
+        
+        # Filter transactions to keep only those within retention period
+        original_count = len(txns)
+        filtered_txns = [
+            tx for tx in txns 
+            if tx.get("timestamp", 0) >= cutoff_timestamp
+        ]
+        
+        deleted_count = original_count - len(filtered_txns)
+        
+        if deleted_count > 0:
+            atomic_write_json(TRANSACTION_CACHE_FILE, filtered_txns)
+            logging.info(f"Cleaned up {deleted_count} transactions older than {TRANSACTION_RETENTION_DAYS} days. Kept {len(filtered_txns)} transactions.")
+        else:
+            logging.info(f"No transactions older than {TRANSACTION_RETENTION_DAYS} days. All {len(filtered_txns)} transactions retained.")
+        
+        return deleted_count
+        
+    except Exception as e:
+        logging.error(f"Error cleaning up old transactions: {e}")
+        return 0
 
 def update_daily_stats(status):
     """Update daily statistics for access attempts."""
@@ -520,20 +575,30 @@ def get_daily_stats():
         return []
 
 def sync_transactions():
-    """Syncs offline transactions with Firebase when internet is restored."""
+    """
+    Syncs cached transactions with Firebase.
+    NOTE: We keep the cache file as it's now our primary local storage.
+    This function only ensures transactions are also in Firestore for backup/analytics.
+    """
     if not os.path.exists(TRANSACTION_CACHE_FILE):
+        logging.info("No transaction cache file to sync")
         return
     if not (is_internet_available() and db is not None):
+        logging.debug("Cannot sync: No internet or Firebase unavailable")
         return
+    
     try:
         txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
         if not txns:
+            logging.info("No transactions to sync")
             return
 
+        logging.info(f"Starting sync of {len(txns)} cached transactions to Firestore...")
+        
         batch_size = 10
         idx = 0
         synced = 0
-        failed_txns = []
+        failed_count = 0
         
         while idx < len(txns):
             batch = txns[idx:idx + batch_size]
@@ -543,6 +608,7 @@ def sync_transactions():
                     if "card_number" in txn and "card" not in txn:
                         txn["card"] = txn.get("card_number")
                         txn.pop("card_number", None)
+                    
                     # Add entity_id to transaction data
                     transaction_data = txn.copy()
                     transaction_data["entity_id"] = ENTITY_ID
@@ -550,25 +616,22 @@ def sync_transactions():
                     # Use new structure: transactions/{push-id} -> transaction data
                     db.collection("transactions").add(transaction_data)
                     synced += 1
-                    logging.info(f"Successfully synced transaction for entity {ENTITY_ID}: {txn.get('card', 'unknown')}")
+                    logging.info(f"Synced transaction to Firestore: {txn.get('card', 'unknown')}")
+                    
                 except google.api_core.exceptions.DeadlineExceeded:
-                    logging.warning(f"Firestore transaction timeout during sync for card: {txn.get('card', 'unknown')}")
-                    failed_txns.append(txn)
+                    logging.warning(f"Firestore timeout during sync for card: {txn.get('card', 'unknown')}")
+                    failed_count += 1
                 except Exception as e:
                     logging.error(f"Error syncing transaction {txn.get('card', 'unknown')}: {str(e)}")
-                    failed_txns.append(txn)
+                    failed_count += 1
+                    
             idx += batch_size
-            time.sleep(1)
+            time.sleep(1)  # Rate limiting
         
-        # Only remove the cache file if ALL transactions were synced successfully
-        if failed_txns:
-            # Update cache file with only failed transactions
-            atomic_write_json(TRANSACTION_CACHE_FILE, failed_txns)
-            logging.warning(f"Synced {synced} transactions, {len(failed_txns)} failed and kept in cache")
-        else:
-            # All transactions synced successfully, remove cache file
-            os.remove(TRANSACTION_CACHE_FILE)
-            logging.info(f"All {synced} offline transactions synced successfully")
+        logging.info(f"Sync complete: {synced} synced, {failed_count} failed. Local cache preserved.")
+        
+        # NOTE: We do NOT delete the cache file anymore as it's our primary storage
+        # Transactions remain in local cache for fast access
             
     except Exception as e:
         logging.error(f"Error syncing transactions: {str(e)}")
@@ -1325,90 +1388,161 @@ def relay():
 # --- Transactions ---
 @app.route("/get_transactions", methods=["GET"])
 def get_transactions():
-    """Fetch the latest RFID access transactions from Firebase, local cache, and recent memory."""
+    """Fetch today's RFID access transactions with pagination support."""
     try:
+        # Get pagination parameters
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 50))
+        date_filter = request.args.get('date', 'today')  # today, week, month, all
+        
         transactions = []
+        total_count = 0
         
-        # First, add recent transactions from memory (most recent)
-        if recent_transactions:
-            for tx in reversed(recent_transactions[-10:]):  # Get last 10, most recent first
-                transactions.append({
-                    "card_number": tx.get("card", "N/A"),
-                    "name": tx.get("name", "Unknown"),
-                    "status": tx.get("status", "Unknown"),
-                    "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
-                    "reader": tx.get("reader", "Unknown"),
-                    "source": "recent_memory"
-                })
+        # Calculate date range
+        now = get_accurate_datetime()
+        if date_filter == 'today':
+            start_of_day = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            end_of_day = int(now.replace(hour=23, minute=59, second=59, microsecond=999999).timestamp())
+        elif date_filter == 'week':
+            start_of_day = int((now - timedelta(days=7)).timestamp())
+            end_of_day = int(now.timestamp())
+        elif date_filter == 'month':
+            start_of_day = int((now - timedelta(days=30)).timestamp())
+            end_of_day = int(now.timestamp())
+        else:  # all
+            start_of_day = 0
+            end_of_day = int(now.timestamp())
         
-        # If we have recent transactions, return them immediately for real-time display
-        if transactions:
-            return jsonify(transactions)
+        # ALWAYS check local cache FIRST (faster, works offline)
+        cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
         
-        # If no recent transactions, try Firestore
-        if db is not None and is_internet_available():
+        # Filter by date range
+        filtered_cached = [
+            tx for tx in cached 
+            if start_of_day <= tx.get("timestamp", 0) <= end_of_day
+        ]
+        
+        # Sort by timestamp descending
+        filtered_cached.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        
+        total_count = len(filtered_cached)
+        
+        # Apply pagination
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        paginated_cached = filtered_cached[start_idx:end_idx]
+        
+        for tx in paginated_cached:
+            transactions.append({
+                "card_number": tx.get("card", "N/A"),
+                "name": tx.get("name", "Unknown"),
+                "status": tx.get("status", "Unknown"),
+                "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
+                "reader": tx.get("reader", "Unknown"),
+                "source": "local_cache"
+            })
+        
+        # If no local transactions and online, try Firestore as fallback
+        if not transactions and db is not None and is_internet_available():
             try:
-                # Read transactions with entity_id filter
-                docs_iter = db.collection("transactions") \
-                              .where("entity_id", "==", ENTITY_ID) \
-                              .order_by("timestamp", direction=firestore.Query.DESCENDING) \
-                              .limit(10).stream()
-                docs = [d.to_dict() or {} for d in docs_iter]
+                logging.info("No local transactions found, checking Firestore...")
+                # Get today's transactions with pagination
+                query = db.collection("transactions") \
+                          .where("entity_id", "==", ENTITY_ID) \
+                          .where(filter=FieldFilter("timestamp", ">=", start_of_day)) \
+                          .where(filter=FieldFilter("timestamp", "<=", end_of_day)) \
+                          .order_by("timestamp", direction=firestore.Query.DESCENDING)
+                
+                # Get all matching documents for count
+                all_docs = [d.to_dict() or {} for d in query.stream()]
+                total_count = len(all_docs)
+                
+                # Apply pagination
+                start_idx = (page - 1) * per_page
+                end_idx = start_idx + per_page
+                paginated_docs = all_docs[start_idx:end_idx]
+                
+                for tx in paginated_docs:
+                    transactions.append({
+                        "card_number": tx.get("card", "N/A"),
+                        "name": tx.get("name", "Unknown"),
+                        "status": tx.get("status", "Unknown"),
+                        "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
+                        "reader": tx.get("reader", "Unknown"),
+                        "source": "firestore"
+                    })
+                    
             except google.api_core.exceptions.DeadlineExceeded:
-                logging.warning("Firestore transaction timeout ....")
-                docs = []
+                logging.warning("Firestore transaction timeout")
             except Exception as e:
                 logging.error(f"Firestore get_transactions error: {e}")
-                docs = []
-
-            for tx in docs:
-                transactions.append({
-                    "card_number": tx.get("card", "N/A"),
-                    "name": tx.get("name", "Unknown"),
-                    "status": tx.get("status", "Unknown"),
-                    "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
-                    "reader": tx.get("reader", "Unknown"),
-                    "source": "firestore"
-                })
-
-            if transactions:
-                return jsonify(transactions)
-
-        # Offline (or no DB): serve cached if available
-        cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
-        if cached:
-            for tx in cached[-10:]:
-                transactions.append({
-                    "card_number": tx.get("card", "N/A"),
-                    "name": tx.get("name", "Unknown"),
-                    "status": tx.get("status", "Unknown"),
-                    "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
-                    "reader": tx.get("reader", "Unknown"),
-                    "source": "cache"
-                })
-            return jsonify(transactions)
+        
+        # Calculate pagination metadata
+        total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
+        
+        return jsonify({
+            "transactions": transactions,
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "has_next": page < total_pages,
+                "has_prev": page > 1
+            },
+            "date_filter": date_filter
+        })
             
-        return jsonify([{"message": "No recent transactions"}])
     except Exception as e:
         return jsonify({"status": "error", "message": f"Error fetching transactions: {str(e)}"}), 500
 
 @app.route("/get_recent_transactions", methods=["GET"])
 def get_recent_transactions():
-    """Get only the most recent transactions from memory for real-time display."""
+    """
+    Get only the most recent transactions for real-time display.
+    Priority: Local cache (fast) -> Firestore (if no local data)
+    """
     try:
         transactions = []
         
-        # Get recent transactions from memory (most recent first)
-        if recent_transactions:
-            for tx in reversed(recent_transactions[-5:]):  # Get last 5 for real-time display
+        # ALWAYS check local cache FIRST (faster and always up-to-date)
+        cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
+        
+        if cached:
+            # Get last 10 transactions from cache (most recent first)
+            recent_cached = sorted(cached, key=lambda x: x.get("timestamp", 0), reverse=True)[:10]
+            
+            for tx in recent_cached:
                 transactions.append({
                     "card_number": tx.get("card", "N/A"),
                     "name": tx.get("name", "Unknown"),
                     "status": tx.get("status", "Unknown"),
                     "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
                     "reader": tx.get("reader", "Unknown"),
-                    "source": "recent_memory"
+                    "source": "local_cache"
                 })
+        
+        # Fallback to Firestore ONLY if no local cache and online
+        if not transactions and db is not None and is_internet_available():
+            try:
+                logging.info("No local recent transactions, checking Firestore...")
+                docs_iter = db.collection("transactions") \
+                              .where("entity_id", "==", ENTITY_ID) \
+                              .order_by("timestamp", direction=firestore.Query.DESCENDING) \
+                              .limit(10).stream()
+                
+                for doc in docs_iter:
+                    tx = doc.to_dict() or {}
+                    transactions.append({
+                        "card_number": tx.get("card", "N/A"),
+                        "name": tx.get("name", "Unknown"),
+                        "status": tx.get("status", "Unknown"),
+                        "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
+                        "reader": tx.get("reader", "Unknown"),
+                        "source": "firestore"
+                    })
+            except Exception as e:
+                logging.error(f"Error fetching from Firestore: {e}")
         
         return jsonify({
             "status": "success",
@@ -1777,13 +1911,10 @@ def get_photo_preferences():
         return jsonify({"status": "error", "message": f"Error getting preferences: {str(e)}"}), 500
 
 @app.route("/save_global_photo_settings", methods=["POST"])
+@require_api_key
 def save_global_photo_settings():
     """Save global photo settings."""
     try:
-        token = request.headers.get('Authorization', '').replace('Bearer ', '')
-        if token not in active_sessions:
-            return jsonify({"status": "error", "message": "Authentication required"}), 401
-        
         data = request.get_json()
         capture_registered = data.get("capture_registered_vehicles", True)
         
@@ -1809,13 +1940,10 @@ def save_global_photo_settings():
         return jsonify({"status": "error", "message": f"Error saving settings: {str(e)}"}), 500
 
 @app.route("/add_photo_preference", methods=["POST"])
+@require_api_key
 def add_photo_preference():
     """Add a photo preference for a card or user."""
     try:
-        token = request.headers.get('Authorization', '').replace('Bearer ', '')
-        if token not in active_sessions:
-            return jsonify({"status": "error", "message": "Authentication required"}), 401
-        
         data = request.get_json()
         pref_type = data.get("type")  # "card" or "user"
         identifier = data.get("identifier")  # card number or user name
@@ -1876,13 +2004,10 @@ def add_photo_preference():
         return jsonify({"status": "error", "message": f"Error adding preference: {str(e)}"}), 500
 
 @app.route("/remove_photo_preference", methods=["POST"])
+@require_api_key
 def remove_photo_preference():
     """Remove a photo preference for a card or user."""
     try:
-        token = request.headers.get('Authorization', '').replace('Bearer ', '')
-        if token not in active_sessions:
-            return jsonify({"status": "error", "message": "Authentication required"}), 401
-        
         data = request.get_json()
         pref_type = data.get("type")  # "card" or "user"
         identifier = data.get("identifier")  # card number or user name
@@ -2727,15 +2852,50 @@ def transaction_cache_status():
             })
         
         cached_txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
+        
+        # Calculate oldest and newest transaction dates
+        oldest_ts = None
+        newest_ts = None
+        if cached_txns:
+            timestamps = [tx.get("timestamp", 0) for tx in cached_txns]
+            oldest_ts = min(timestamps) if timestamps else None
+            newest_ts = max(timestamps) if timestamps else None
+        
+        # Calculate days since oldest
+        days_old = None
+        if oldest_ts:
+            age_seconds = get_accurate_timestamp() - oldest_ts
+            days_old = age_seconds // 86400
+        
         return jsonify({
             "status": "success",
             "cached_count": len(cached_txns),
-            "message": f"{len(cached_txns)} transactions cached"
+            "oldest_transaction": datetime.fromtimestamp(oldest_ts).isoformat() if oldest_ts else None,
+            "newest_transaction": datetime.fromtimestamp(newest_ts).isoformat() if newest_ts else None,
+            "oldest_age_days": int(days_old) if days_old else 0,
+            "days_retention": TRANSACTION_RETENTION_DAYS,
+            "message": f"{len(cached_txns)} transactions cached (retention: {TRANSACTION_RETENTION_DAYS} days)"
         })
         
     except Exception as e:
         logging.error(f"Error checking cache status: {e}")
         return jsonify({"status": "error", "message": f"Error checking cache: {str(e)}"}), 500
+
+@app.route("/cleanup_old_transactions", methods=["POST"])
+@require_api_key
+def manual_cleanup_old_transactions():
+    """Manually trigger cleanup of transactions older than TRANSACTION_RETENTION_DAYS."""
+    try:
+        deleted_count = cleanup_old_transactions()
+        
+        return jsonify({
+            "status": "success",
+            "deleted_count": deleted_count,
+            "retention_days": TRANSACTION_RETENTION_DAYS,
+            "message": f"Cleaned up {deleted_count} transactions older than {TRANSACTION_RETENTION_DAYS} days"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error cleaning up transactions: {str(e)}"}), 500
 
 # --- Offline Images Management ---
 @app.route("/get_offline_images", methods=["GET"])
@@ -3285,10 +3445,17 @@ def handle_access(bits, value, reader_id):
         logging.error(f"Unexpected error in handle_access for reader {reader_id}: {str(e)}")
 
 def transaction_uploader():
-    """Background worker to upload/cache transactions."""
+    """
+    Background worker to cache and upload transactions.
+    Strategy: ALWAYS cache locally first (fast), then upload to Firestore in background.
+    """
     while True:
         transaction = transaction_queue.get()
         try:
+            # ALWAYS cache locally first for fast access
+            cache_transaction(transaction)
+            
+            # Then try to upload to Firestore in background
             if is_internet_available() and db is not None:
                 try:
                     # Add entity_id to transaction data
@@ -3297,13 +3464,14 @@ def transaction_uploader():
                     
                     # Firestore path: transactions/{push-id} -> transaction data
                     db.collection("transactions").add(transaction_data)
-                    logging.info(f"Transaction uploaded with push ID for entity {ENTITY_ID}")
+                    logging.info(f"Transaction uploaded to Firestore with push ID for entity {ENTITY_ID}")
                 except Exception as e:
-                    logging.error(f"Error uploading transaction: {str(e)}")
-                    cache_transaction(transaction)
+                    logging.error(f"Error uploading transaction to Firestore: {str(e)}")
+                    # Transaction is already cached, so no data loss
             else:
-                logging.warning("No internet/Firebase unavailable. Transaction cached.")
-                cache_transaction(transaction)
+                logging.debug("No internet/Firebase unavailable. Transaction cached locally only.")
+        except Exception as e:
+            logging.error(f"Error in transaction_uploader: {str(e)}")
         finally:
             transaction_queue.task_done()
 
@@ -3547,6 +3715,7 @@ threading.Thread(target=transaction_uploader, daemon=True).start()
 threading.Thread(target=image_uploader_worker, daemon=True).start()
 threading.Thread(target=session_cleanup_worker, daemon=True).start()
 threading.Thread(target=daily_stats_cleanup_worker, daemon=True).start()
+threading.Thread(target=transaction_cleanup_worker, daemon=True).start()
 threading.Thread(target=storage_monitor_worker, daemon=True).start()
 
 # Flask serve

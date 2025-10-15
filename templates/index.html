@@ -438,15 +438,24 @@
             <div class="col-md-6">
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0"><i class="fas fa-history"></i> Recent Scans</h5>
-                        <span class="badge bg-primary" id="scans-count">0</span>
+                        <h5 class="mb-0"><i class="fas fa-history"></i> Transactions</h5>
+                        <div class="d-flex align-items-center">
+                            <select class="form-select form-select-sm me-2" id="dateFilter" onchange="fetchAndDisplayScans(1, this.value)" style="width: auto;">
+                                <option value="today">Today</option>
+                                <option value="week">Last 7 Days</option>
+                                <option value="month">Last 30 Days</option>
+                                <option value="all">All Time</option>
+                            </select>
+                            <span class="badge bg-primary" id="scans-count">0</span>
+                        </div>
                     </div>
-                    <div class="card-body" style="max-height: 600px; overflow-y: auto;">
+                    <div class="card-body" style="max-height: 700px; overflow-y: auto;">
                         <div id="scans-container">
                             <div class="text-center text-muted">
-                                <i class="fas fa-spinner fa-spin"></i> Loading scans...
+                                <i class="fas fa-spinner fa-spin"></i> Loading transactions...
                             </div>
                         </div>
+                        <div id="pagination-container"></div>
                     </div>
                 </div>
             </div>
@@ -1684,21 +1693,30 @@
             }
         }
 
-        async function fetchAndDisplayScans() {
+        // Pagination state
+        let currentPage = 1;
+        let currentDateFilter = 'today';
+        
+        async function fetchAndDisplayScans(page = 1, dateFilter = 'today') {
             try {
-                // Use the new real-time endpoint for faster updates
-                const response = await fetch('/get_recent_transactions');
+                currentPage = page;
+                currentDateFilter = dateFilter;
+                
+                // Fetch paginated transactions
+                const response = await fetch(`/get_transactions?page=${page}&per_page=50&date=${dateFilter}`);
                 const result = await response.json();
                 
-                if (result.status === 'success' && result.transactions.length > 0) {
+                if (result.transactions) {
                     displayScans(result.transactions);
                     updateScanStats(result.transactions);
+                    displayPagination(result.pagination, dateFilter);
+                } else if (Array.isArray(result)) {
+                    // Handle old response format (backward compatibility)
+                    displayScans(result);
+                    updateScanStats(result);
                 } else {
-                    // Fallback to regular endpoint if no recent transactions
-                    const fallbackResponse = await fetch('/get_transactions');
-                    const scans = await fallbackResponse.json();
-                    displayScans(scans);
-                    updateScanStats(scans);
+                    document.getElementById('scans-container').innerHTML = 
+                        '<div class="text-center text-muted"><i class="fas fa-info-circle"></i> No transactions found</div>';
                 }
                 
             } catch (error) {
@@ -1706,6 +1724,39 @@
                 document.getElementById('scans-container').innerHTML = 
                     '<div class="text-center text-danger"><i class="fas fa-exclamation-triangle"></i> Error loading scans</div>';
             }
+        }
+
+        function displayPagination(pagination, dateFilter) {
+            const paginationContainer = document.getElementById('pagination-container');
+            if (!paginationContainer || !pagination) return;
+            
+            let paginationHtml = `
+                <div class="d-flex justify-content-between align-items-center mt-3">
+                    <div>
+                        <small class="text-muted">
+                            Showing page ${pagination.page} of ${pagination.total_pages} 
+                            (Total: ${pagination.total_count} transactions)
+                        </small>
+                    </div>
+                    <div class="btn-group" role="group">
+                        <button class="btn btn-sm btn-outline-primary ${!pagination.has_prev ? 'disabled' : ''}" 
+                                onclick="fetchAndDisplayScans(${pagination.page - 1}, '${dateFilter}')"
+                                ${!pagination.has_prev ? 'disabled' : ''}>
+                            <i class="fas fa-chevron-left"></i> Previous
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary" disabled>
+                            Page ${pagination.page}
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary ${!pagination.has_next ? 'disabled' : ''}" 
+                                onclick="fetchAndDisplayScans(${pagination.page + 1}, '${dateFilter}')"
+                                ${!pagination.has_next ? 'disabled' : ''}>
+                            Next <i class="fas fa-chevron-right"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            paginationContainer.innerHTML = paginationHtml;
         }
 
         function displayScans(scans) {
@@ -3111,7 +3162,8 @@
             const token = getAuthToken();
             return {
                 'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'X-API-Key': getApiKey()
             };
         }
 
