@@ -470,6 +470,18 @@ def cache_transaction(transaction):
     atomic_write_json(TRANSACTION_CACHE_FILE, txns)
     logging.info(f"Transaction cached locally: {transaction.get('card', 'unknown')}")
 
+def mark_transaction_uploaded(timestamp):
+    """Mark a transaction as uploaded to Firestore."""
+    try:
+        txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
+        for tx in txns:
+            if tx.get("timestamp") == timestamp:
+                tx["uploaded_to_firestore"] = True
+                break
+        atomic_write_json(TRANSACTION_CACHE_FILE, txns)
+    except Exception as e:
+        logging.error(f"Error marking transaction as uploaded: {e}")
+
 def cleanup_old_transactions():
     """
     Clean up transactions older than TRANSACTION_RETENTION_DAYS from local cache.
@@ -608,15 +620,22 @@ def sync_transactions():
             logging.info("No transactions to sync")
             return
 
-        logging.info(f"Starting sync of {len(txns)} cached transactions to Firestore...")
+        # Filter out transactions that have already been uploaded
+        unsynced_txns = [tx for tx in txns if not tx.get("uploaded_to_firestore", False)]
+        
+        if not unsynced_txns:
+            logging.info("All transactions already synced to Firestore")
+            return
+        
+        logging.info(f"Starting sync of {len(unsynced_txns)} unsynced transactions to Firestore...")
         
         batch_size = 10
         idx = 0
         synced = 0
         failed_count = 0
         
-        while idx < len(txns):
-            batch = txns[idx:idx + batch_size]
+        while idx < len(unsynced_txns):
+            batch = unsynced_txns[idx:idx + batch_size]
             for txn in batch:
                 try:
                     # Ensure new schema keys for consistency
@@ -627,11 +646,16 @@ def sync_transactions():
                     # Add entity_id to transaction data
                     transaction_data = txn.copy()
                     transaction_data["entity_id"] = ENTITY_ID
+                    # Remove upload tracking flag
+                    transaction_data.pop("uploaded_to_firestore", None)
                     
                     # Use new structure: transactions/{push-id} -> transaction data
                     db.collection("transactions").add(transaction_data)
                     synced += 1
                     logging.info(f"Synced transaction to Firestore: {txn.get('card', 'unknown')}")
+                    
+                    # Mark as uploaded
+                    mark_transaction_uploaded(txn.get("timestamp"))
                     
                 except google.api_core.exceptions.DeadlineExceeded:
                     logging.warning(f"Firestore timeout during sync for card: {txn.get('card', 'unknown')}")
@@ -3441,7 +3465,8 @@ def handle_access(bits, value, reader_id):
             "card": str(card_int),
             "reader": reader_id,
             "status": status,
-            "timestamp": timestamp
+            "timestamp": timestamp,
+            "uploaded_to_firestore": False  # Track upload status
         }
 
         # Update daily statistics
@@ -3476,10 +3501,16 @@ def transaction_uploader():
                     # Add entity_id to transaction data
                     transaction_data = transaction.copy()
                     transaction_data["entity_id"] = ENTITY_ID
+                    # Remove upload tracking flag before uploading
+                    transaction_data.pop("uploaded_to_firestore", None)
                     
                     # Firestore path: transactions/{push-id} -> transaction data
                     db.collection("transactions").add(transaction_data)
                     logging.info(f"Transaction uploaded to Firestore with push ID for entity {ENTITY_ID}")
+                    
+                    # Mark transaction as uploaded in cache
+                    mark_transaction_uploaded(transaction.get("timestamp"))
+                    
                 except Exception as e:
                     logging.error(f"Error uploading transaction to Firestore: {str(e)}")
                     # Transaction is already cached, so no data loss
