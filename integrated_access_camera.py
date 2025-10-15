@@ -69,31 +69,22 @@ ENTITY_CONFIG_FILE = os.path.join(BASE_DIR, "entity_config.json")
 TRANSACTION_RETENTION_DAYS = int(os.environ.get('TRANSACTION_RETENTION_DAYS', '120'))  # Keep transactions for 120 days
 FIREBASE_CRED_FILE = os.environ.get('FIREBASE_CRED_FILE', "service.json")
 
-# Load entity_id from config file or environment variable
-def get_entity_id():
-    """Get entity_id from config file or environment variable."""
+# Load entity_id from config file or environment variable (simple version for initialization)
+def load_entity_id_simple():
+    """Load entity_id from config file or environment variable (simple version)."""
     try:
         if os.path.exists(ENTITY_CONFIG_FILE):
-            config = read_json_or_default(ENTITY_CONFIG_FILE, {})
-            return config.get('entity_id', os.environ.get('ENTITY_ID', 'default_entity'))
+            with open(ENTITY_CONFIG_FILE, 'r') as f:
+                import json
+                config = json.load(f)
+                return config.get('entity_id', os.environ.get('ENTITY_ID', 'default_entity'))
         else:
             return os.environ.get('ENTITY_ID', 'default_entity')
     except Exception as e:
-        logging.error(f"Error loading entity_id: {e}")
+        print(f"Error loading entity_id: {e}")
         return os.environ.get('ENTITY_ID', 'default_entity')
 
-def save_entity_id(entity_id):
-    """Save entity_id to config file."""
-    try:
-        config = {"entity_id": entity_id}
-        atomic_write_json(ENTITY_CONFIG_FILE, config)
-        logging.info(f"Entity ID saved: {entity_id}")
-        return True
-    except Exception as e:
-        logging.error(f"Error saving entity_id: {e}")
-        return False
-
-ENTITY_ID = get_entity_id()
+ENTITY_ID = load_entity_id_simple()
 
 # Ensure base directory exists
 os.makedirs(BASE_DIR, exist_ok=True)
@@ -362,6 +353,30 @@ def read_json_or_default(path, default):
     except Exception as e:
         logging.error(f"Error reading {path}: {e}")
         return default
+
+# Entity ID management functions (defined after utility functions)
+def get_entity_id():
+    """Get entity_id from config file or environment variable."""
+    try:
+        if os.path.exists(ENTITY_CONFIG_FILE):
+            config = read_json_or_default(ENTITY_CONFIG_FILE, {})
+            return config.get('entity_id', os.environ.get('ENTITY_ID', 'default_entity'))
+        else:
+            return os.environ.get('ENTITY_ID', 'default_entity')
+    except Exception as e:
+        logging.error(f"Error loading entity_id: {e}")
+        return os.environ.get('ENTITY_ID', 'default_entity')
+
+def save_entity_id(entity_id):
+    """Save entity_id to config file."""
+    try:
+        config = {"entity_id": entity_id}
+        atomic_write_json(ENTITY_CONFIG_FILE, config)
+        logging.info(f"Entity ID saved: {entity_id}")
+        return True
+    except Exception as e:
+        logging.error(f"Error saving entity_id: {e}")
+        return False
 
 def _ts_to_epoch(ts):
     """Normalize Firestore/epoch timestamps to float epoch seconds."""
@@ -2712,8 +2727,8 @@ def get_storage_stats():
 
 @app.route("/cleanup_old_images", methods=["POST"])
 @require_auth
-def cleanup_old_images():
-    """Clean up old images based on days to keep."""
+def cleanup_old_images_api():
+    """Clean up old images based on days to keep (API endpoint)."""
     try:
         data = request.get_json()
         days_to_keep = data.get('days_to_keep', 30)

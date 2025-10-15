@@ -1640,7 +1640,7 @@
             refreshInterval = setInterval(refreshData, 5000);
             
             // Faster refresh for transactions (every 2 seconds)
-            transactionRefreshInterval = setInterval(fetchAndDisplayScans, 2000);
+            transactionRefreshInterval = setInterval(() => fetchAndDisplayScans(currentPage, currentDateFilter), 2000);
             
             // Initialize form handlers
             initializeFormHandlers();
@@ -1667,7 +1667,7 @@
                 await refreshHealthStatus();
                 
                 // Fetch and display scans
-                await fetchAndDisplayScans();
+                await fetchAndDisplayScans(currentPage, currentDateFilter);
                 
                 // Fetch and display images
                 await fetchAndDisplayImages();
@@ -1710,6 +1710,11 @@
                     displayScans(result.transactions);
                     updateScanStats(result.transactions);
                     displayPagination(result.pagination, dateFilter);
+                    
+                    // Update count badge with total count
+                    if (result.pagination) {
+                        document.getElementById('scans-count').textContent = result.pagination.total_count;
+                    }
                 } else if (Array.isArray(result)) {
                     // Handle old response format (backward compatibility)
                     displayScans(result);
@@ -1717,6 +1722,7 @@
                 } else {
                     document.getElementById('scans-container').innerHTML = 
                         '<div class="text-center text-muted"><i class="fas fa-info-circle"></i> No transactions found</div>';
+                    document.getElementById('scans-count').textContent = 0;
                 }
                 
             } catch (error) {
@@ -1761,9 +1767,8 @@
 
         function displayScans(scans) {
             const container = document.getElementById('scans-container');
-            const count = document.getElementById('scans-count');
             
-            count.textContent = scans.length;
+            // Don't update count here - it's updated in fetchAndDisplayScans with pagination.total_count
             
             if (scans.length === 0) {
                 container.innerHTML = '<div class="text-center text-muted">No recent scans</div>';

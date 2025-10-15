@@ -54,34 +54,58 @@ class DS3232RTC:
             self.logger.error(f"Error initializing DS3232 RTC: {e}")
     
     def _check_rtc_presence(self) -> bool:
-        """Check if DS3232 RTC is present on I2C bus."""
+        """
+        Check if DS3232/DS3231 RTC is present.
+        Uses multiple methods for reliable detection.
+        """
         try:
-            # Use i2cdetect to check for RTC at address 0x68
-            result = subprocess.run(
-                ['i2cdetect', '-y', str(self.i2c_bus)],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
-            self.logger.info(f"i2cdetect output: {result.stdout}")
-            self.logger.info(f"i2cdetect stderr: {result.stderr}")
-            self.logger.info(f"Looking for address: {self.i2c_address:02x}")
-            
-            if result.returncode == 0:
-                # Check if our address (0x68) is present in the output
-                address_found = f"{self.i2c_address:02x}" in result.stdout.lower()
-                self.logger.info(f"RTC address {self.i2c_address:02x} found: {address_found}")
-                return address_found
-            else:
-                self.logger.error(f"i2cdetect failed with return code {result.returncode}: {result.stderr}")
-                return False
+            # Method 1: Check for /dev/rtc device
+            rtc_devices = [f for f in os.listdir("/dev") if f.startswith("rtc")]
+            if rtc_devices:
+                self.logger.info(f"RTC device(s) found: {', '.join(rtc_devices)}")
                 
-        except subprocess.TimeoutExpired:
-            self.logger.error("i2cdetect timeout")
+                # Method 2: Try to read from hwclock
+                try:
+                    result = subprocess.run(
+                        ['sudo', 'hwclock', '-r'],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if result.returncode == 0:
+                        self.logger.info(f"hwclock read successful: {result.stdout.strip()}")
+                        return True
+                    else:
+                        self.logger.warning(f"hwclock failed: {result.stderr.strip()}")
+                except Exception as e:
+                    self.logger.warning(f"hwclock check failed: {e}")
+            
+            # Method 3: Fallback - check I2C bus (only if above methods fail)
+            self.logger.info("Checking I2C bus as fallback...")
+            try:
+                result = subprocess.run(
+                    ['i2cdetect', '-y', str(self.i2c_bus)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                if result.returncode == 0:
+                    address_found = f"{self.i2c_address:02x}" in result.stdout.lower()
+                    if address_found:
+                        self.logger.info(f"RTC detected at I2C address {self.i2c_address:02x}")
+                        return True
+                    else:
+                        self.logger.warning(f"I2C address {self.i2c_address:02x} not found")
+                        return False
+            except FileNotFoundError:
+                self.logger.error("i2cdetect not found. Install with: sudo apt install i2c-tools")
+                return False
+            
             return False
+                
         except FileNotFoundError:
-            self.logger.error("i2cdetect command not found. Make sure i2c-tools is installed.")
+            self.logger.error("Cannot access /dev directory")
             return False
         except Exception as e:
             self.logger.error(f"Error checking RTC presence: {e}")
