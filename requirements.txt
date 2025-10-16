@@ -37,9 +37,6 @@ Pillow==10.0.1
 # System monitoring and process management
 psutil==5.9.6
 
-# I2C communication for DS3232 RTC
-smbus2==0.4.3
-
 # JSON schema validation (optional, for API validation)
 jsonschema==4.19.2
 

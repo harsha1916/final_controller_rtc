@@ -125,18 +125,6 @@ http://your-raspberry-pi-ip:5001
   {
     "internet": true,
     "firebase": true,
-    "rtc": {
-      "enabled": true,
-      "available": true,
-      "time_source": "RTC",
-      "time_difference_seconds": 0.0
-    },
-    "temperature": {
-      "temperature_celsius": 45.2,
-      "temperature_fahrenheit": 113.4,
-      "status": "normal",
-      "source": "thermal_zone"
-    },
     "cameras": {
       "camera_1": {
         "status": "online",
@@ -154,92 +142,6 @@ http://your-raspberry-pi-ip:5001
       "free_gb": 15.2,
       "used_gb": 16.8
     }
-  }
-  ```
-
-### 9. RTC Status
-- **URL**: `GET /rtc_status`
-- **Description**: Get DS3232 RTC module status and information
-- **Authentication**: None
-- **Response**:
-  ```json
-  {
-    "rtc_enabled": true,
-    "rtc_available": true,
-    "i2c_bus": 1,
-    "i2c_address": "0x68",
-    "current_time": "2024-01-01T12:00:00Z",
-    "time_source": "RTC",
-    "rtc_time": "2024-01-01T12:00:00Z",
-    "system_time": "2024-01-01T12:00:00Z",
-    "time_difference_seconds": 0.0
-  }
-  ```
-
-### 10. Sync Time with RTC
-- **URL**: `POST /sync_time`
-- **Description**: Sync system time with DS3232 RTC module
-- **Authentication**: API Key required
-- **Response**:
-  ```json
-  {
-    "status": "success",
-    "message": "Time synchronized successfully",
-    "rtc_status": {
-      "rtc_enabled": true,
-      "rtc_available": true,
-      "time_source": "RTC"
-    }
-  }
-  ```
-
-### 11. Temperature Status
-- **URL**: `GET /temperature`
-- **Description**: Get Raspberry Pi CPU temperature information
-- **Authentication**: None
-- **Response**:
-  ```json
-  {
-    "status": "success",
-    "timestamp": "2024-01-01T12:00:00Z",
-    "temperature": {
-      "temperature_celsius": 45.2,
-      "temperature_fahrenheit": 113.4,
-      "status": "normal",
-      "source": "thermal_zone"
-    }
-  }
-  ```
-
-### 12. Get Entity Configuration
-- **URL**: `GET /get_entity_config`
-- **Description**: Get current entity configuration
-- **Authentication**: None
-- **Response**:
-  ```json
-  {
-    "status": "success",
-    "entity_id": "your_entity_id",
-    "config_file_exists": true
-  }
-  ```
-
-### 13. Save Entity Configuration
-- **URL**: `POST /save_entity_config`
-- **Description**: Save entity configuration
-- **Authentication**: API Key required
-- **Request Body**:
-  ```json
-  {
-    "entity_id": "your_entity_id"
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "status": "success",
-    "message": "Entity ID updated to: your_entity_id",
-    "entity_id": "your_entity_id"
   }
   ```
 
@@ -768,11 +670,6 @@ FIREBASE_PROJECT_ID=your-project-id
 # System Configuration
 API_KEY=your-secure-api-key
 ADMIN_PASSWORD=your-admin-password
-
-# DS3232 RTC Configuration
-RTC_ENABLED=true
-RTC_I2C_BUS=1
-RTC_I2C_ADDRESS=0x68
 ```
 
 ---

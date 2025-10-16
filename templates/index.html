@@ -269,34 +269,6 @@
                                     </div>
                                 </div>
                                 
-                                <!-- Second Row for Additional Health Items -->
-                                <div class="row mt-3">
-                                    <div class="col-md-3">
-                                        <div class="health-item text-center">
-                                            <div class="health-icon mb-2">
-                                                <i class="fas fa-thermometer-half fa-2x" id="temperatureIcon"></i>
-                                            </div>
-                                            <h6>CPU Temperature</h6>
-                                            <span class="badge" id="temperatureStatus">Checking...</span>
-                                            <div class="mt-1">
-                                                <small class="text-muted" id="temperatureValue">--°C</small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="col-md-3">
-                                        <div class="health-item text-center">
-                                            <div class="health-icon mb-2">
-                                                <i class="fas fa-clock fa-2x" id="rtcIcon"></i>
-                                            </div>
-                                            <h6>RTC Module</h6>
-                                            <span class="badge" id="rtcStatus">Checking...</span>
-                                            <div class="mt-1">
-                                                <small class="text-muted" id="rtcTimeSource">--</small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                                
                                 <!-- Transaction Sync Status -->
                                 <div class="row mt-3">
                                     <div class="col-12">
@@ -438,24 +410,15 @@
             <div class="col-md-6">
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0"><i class="fas fa-history"></i> Transactions</h5>
-                        <div class="d-flex align-items-center">
-                            <select class="form-select form-select-sm me-2" id="dateFilter" onchange="fetchAndDisplayScans(1, this.value)" style="width: auto;">
-                                <option value="today">Today</option>
-                                <option value="week">Last 7 Days</option>
-                                <option value="month">Last 30 Days</option>
-                                <option value="all">All Time</option>
-                            </select>
-                            <span class="badge bg-primary" id="scans-count">0</span>
-                        </div>
+                        <h5 class="mb-0"><i class="fas fa-history"></i> Recent Scans</h5>
+                        <span class="badge bg-primary" id="scans-count">0</span>
                     </div>
-                    <div class="card-body" style="max-height: 700px; overflow-y: auto;">
+                    <div class="card-body" style="max-height: 600px; overflow-y: auto;">
                         <div id="scans-container">
                             <div class="text-center text-muted">
-                                <i class="fas fa-spinner fa-spin"></i> Loading transactions...
+                                <i class="fas fa-spinner fa-spin"></i> Loading scans...
                             </div>
                         </div>
-                        <div id="pagination-container"></div>
                     </div>
                 </div>
             </div>
@@ -790,15 +753,7 @@
                                 <div class="col-md-3">
                                     <div class="mb-3">
                                         <label for="entityId" class="form-label">Entity ID</label>
-                                        <input type="text" class="form-control" id="entityId" placeholder="default_entity" 
-                                               pattern="[a-zA-Z0-9_-]+" minlength="3" maxlength="50"
-                                               title="Entity ID can only contain letters, numbers, underscores, and hyphens (3-50 characters)">
-                                        <div class="form-text">
-                                            <small class="text-muted">
-                                                <i class="fas fa-info-circle"></i> 
-                                                Identifies your organization in the database
-                                            </small>
-                                        </div>
+                                        <input type="text" class="form-control" id="entityId" placeholder="default_entity">
                                     </div>
                                 </div>
                             </div>
@@ -809,68 +764,6 @@
                     </div>
                 </div>
             </div>
-
-            <!-- RTC Configuration -->
-            <div class="row mt-4">
-                <div class="col-12">
-                    <div class="card">
-                        <div class="card-header d-flex justify-content-between align-items-center">
-                            <h5 class="mb-0"><i class="fas fa-clock"></i> DS3232 RTC Configuration</h5>
-                            <div>
-                                <button class="btn btn-sm btn-outline-info me-2" onclick="checkRTCStatus()">
-                                    <i class="fas fa-info-circle"></i> Check Status
-                                </button>
-                            <button class="btn btn-sm btn-outline-primary" onclick="syncTimeWithRTC()">
-                                <i class="fas fa-sync"></i> Sync Time
-                            </button>
-                            <button class="btn btn-sm btn-outline-warning ms-2" onclick="debugRTC()">
-                                <i class="fas fa-bug"></i> Debug RTC
-                            </button>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="row">
-                                <div class="col-md-4">
-                                    <div class="mb-3">
-                                        <label for="rtcEnabled" class="form-label">RTC Enabled</label>
-                                        <select class="form-select" id="rtcEnabled">
-                                            <option value="true">Enabled</option>
-                                            <option value="false">Disabled</option>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div class="col-md-4">
-                                    <div class="mb-3">
-                                        <label for="rtcI2CBus" class="form-label">I2C Bus</label>
-                                        <input type="number" class="form-control" id="rtcI2CBus" value="1" min="0" max="1">
-                                    </div>
-                                </div>
-                                <div class="col-md-4">
-                                    <div class="mb-3">
-                                        <label for="rtcI2CAddress" class="form-label">I2C Address</label>
-                                        <input type="text" class="form-control" id="rtcI2CAddress" value="0x68" placeholder="0x68">
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <!-- RTC Status Display -->
-                            <div class="row mt-3">
-                                <div class="col-12">
-                                    <div class="alert alert-info" id="rtcStatusAlert" style="display: none;">
-                                        <h6><i class="fas fa-info-circle"></i> RTC Status</h6>
-                                        <div id="rtcStatusContent"></div>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <button type="button" class="btn btn-success" onclick="saveRTCConfig()">
-                                <i class="fas fa-save"></i> Save RTC Configuration
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
 
             <!-- Wiegand Configuration -->
             <div class="row mt-4">
@@ -1630,7 +1523,6 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
         let refreshInterval;
-        let transactionRefreshInterval;
         let isRefreshing = false;
 
         // Initialize the interface
@@ -1639,9 +1531,6 @@
             // Auto-refresh every 5 seconds
             refreshInterval = setInterval(refreshData, 5000);
             
-            // Faster refresh for transactions (every 2 seconds)
-            transactionRefreshInterval = setInterval(() => fetchAndDisplayScans(currentPage, currentDateFilter), 2000);
-            
             // Initialize form handlers
             initializeFormHandlers();
             
@@ -1649,10 +1538,11 @@
             loadConfiguration();
         });
 
-        // Cleanup intervals when page is unloaded
+        // Cleanup on page unload
         window.addEventListener('beforeunload', function() {
-            if (refreshInterval) clearInterval(refreshInterval);
-            if (transactionRefreshInterval) clearInterval(transactionRefreshInterval);
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
         });
 
         async function refreshData() {
@@ -1667,7 +1557,7 @@
                 await refreshHealthStatus();
                 
                 // Fetch and display scans
-                await fetchAndDisplayScans(currentPage, currentDateFilter);
+                await fetchAndDisplayScans();
                 
                 // Fetch and display images
                 await fetchAndDisplayImages();
@@ -1693,37 +1583,13 @@
             }
         }
 
-        // Pagination state
-        let currentPage = 1;
-        let currentDateFilter = 'today';
-        
-        async function fetchAndDisplayScans(page = 1, dateFilter = 'today') {
+        async function fetchAndDisplayScans() {
             try {
-                currentPage = page;
-                currentDateFilter = dateFilter;
+                const response = await fetch('/get_transactions');
+                const scans = await response.json();
                 
-                // Fetch paginated transactions
-                const response = await fetch(`/get_transactions?page=${page}&per_page=50&date=${dateFilter}`);
-                const result = await response.json();
-                
-                if (result.transactions) {
-                    displayScans(result.transactions);
-                    updateScanStats(result.transactions);
-                    displayPagination(result.pagination, dateFilter);
-                    
-                    // Update count badge with total count
-                    if (result.pagination) {
-                        document.getElementById('scans-count').textContent = result.pagination.total_count;
-                    }
-                } else if (Array.isArray(result)) {
-                    // Handle old response format (backward compatibility)
-                    displayScans(result);
-                    updateScanStats(result);
-                } else {
-                    document.getElementById('scans-container').innerHTML = 
-                        '<div class="text-center text-muted"><i class="fas fa-info-circle"></i> No transactions found</div>';
-                    document.getElementById('scans-count').textContent = 0;
-                }
+                displayScans(scans);
+                updateScanStats(scans);
                 
             } catch (error) {
                 console.error('Error fetching scans:', error);
@@ -1732,43 +1598,11 @@
             }
         }
 
-        function displayPagination(pagination, dateFilter) {
-            const paginationContainer = document.getElementById('pagination-container');
-            if (!paginationContainer || !pagination) return;
-            
-            let paginationHtml = `
-                <div class="d-flex justify-content-between align-items-center mt-3">
-                    <div>
-                        <small class="text-muted">
-                            Showing page ${pagination.page} of ${pagination.total_pages} 
-                            (Total: ${pagination.total_count} transactions)
-                        </small>
-                    </div>
-                    <div class="btn-group" role="group">
-                        <button class="btn btn-sm btn-outline-primary ${!pagination.has_prev ? 'disabled' : ''}" 
-                                onclick="fetchAndDisplayScans(${pagination.page - 1}, '${dateFilter}')"
-                                ${!pagination.has_prev ? 'disabled' : ''}>
-                            <i class="fas fa-chevron-left"></i> Previous
-                        </button>
-                        <button class="btn btn-sm btn-outline-primary" disabled>
-                            Page ${pagination.page}
-                        </button>
-                        <button class="btn btn-sm btn-outline-primary ${!pagination.has_next ? 'disabled' : ''}" 
-                                onclick="fetchAndDisplayScans(${pagination.page + 1}, '${dateFilter}')"
-                                ${!pagination.has_next ? 'disabled' : ''}>
-                            Next <i class="fas fa-chevron-right"></i>
-                        </button>
-                    </div>
-                </div>
-            `;
-            
-            paginationContainer.innerHTML = paginationHtml;
-        }
-
         function displayScans(scans) {
             const container = document.getElementById('scans-container');
+            const count = document.getElementById('scans-count');
             
-            // Don't update count here - it's updated in fetchAndDisplayScans with pagination.total_count
+            count.textContent = scans.length;
             
             if (scans.length === 0) {
                 container.innerHTML = '<div class="text-center text-muted">No recent scans</div>';
@@ -2037,17 +1871,14 @@
 
             try {
                 const params = new URLSearchParams({
+                    api_key: getApiKey(),
                     card_number: cardNumber,
                     id: userId,
                     name: name,
                     ref_id: refId
                 });
 
-                const response = await fetch(`/add_user?${params}`, {
-                    headers: {
-                        'X-API-Key': getApiKey()
-                    }
-                });
+                const response = await fetch(`/add_user?${params}`);
                 const result = await response.json();
 
                 if (result.status === 'success') {
@@ -2072,14 +1903,11 @@
 
             try {
                 const params = new URLSearchParams({
+                    api_key: getApiKey(),
                     card_number: cardNumber
                 });
 
-                const response = await fetch(`/delete_user?${params}`, {
-                    headers: {
-                        'X-API-Key': getApiKey()
-                    }
-                });
+                const response = await fetch(`/delete_user?${params}`);
                 const result = await response.json();
 
                 if (result.status === 'success') {
@@ -2104,14 +1932,11 @@
 
             try {
                 const params = new URLSearchParams({
+                    api_key: getApiKey(),
                     card_number: cardNumber
                 });
 
-                const response = await fetch(`/block_user?${params}`, {
-                    headers: {
-                        'X-API-Key': getApiKey()
-                    }
-                });
+                const response = await fetch(`/block_user?${params}`);
                 const result = await response.json();
 
                 if (result.status === 'success') {
@@ -2136,14 +1961,11 @@
 
             try {
                 const params = new URLSearchParams({
+                    api_key: getApiKey(),
                     card_number: cardNumber
                 });
 
-                const response = await fetch(`/unblock_user?${params}`, {
-                    headers: {
-                        'X-API-Key': getApiKey()
-                    }
-                });
+                const response = await fetch(`/unblock_user?${params}`);
                 const result = await response.json();
 
                 if (result.status === 'success') {
@@ -2756,29 +2578,9 @@
                 document.getElementById('bindPort').value = config.bind_port || 9000;
                 document.getElementById('apiKey').value = config.api_key || '';
                 document.getElementById('scanDelaySeconds').value = config.scan_delay_seconds || 60;
-                
-                // Load entity ID from the new API
-                try {
-                    const entityResponse = await fetch('/get_entity_config', {
-                        headers: {
-                            'X-API-Key': getApiKey()
-                        }
-                    });
-                    const entityResult = await entityResponse.json();
-                    if (entityResult.status === 'success' && document.getElementById('entityId')) {
-                        document.getElementById('entityId').value = entityResult.entity_id;
-                    }
-                } catch (error) {
-                    // Fallback to config.entity_id if API fails
-                    if (document.getElementById('entityId')) {
-                        document.getElementById('entityId').value = config.entity_id || 'default_entity';
-                    }
+                if (document.getElementById('entityId')) {
+                    document.getElementById('entityId').value = config.entity_id || 'default_entity';
                 }
-                
-                // Load RTC configuration
-                document.getElementById('rtcEnabled').value = config.rtc_enabled !== false ? 'true' : 'false';
-                document.getElementById('rtcI2CBus').value = config.rtc_i2c_bus || 1;
-                document.getElementById('rtcI2CAddress').value = config.rtc_i2c_address || '0x68';
                 
                 // Load Wiegand configuration
                 document.getElementById('wiegandBitsReader1').value = config.wiegand_bits_reader_1 || 26;
@@ -2919,11 +2721,11 @@
                 bind_ip: document.getElementById('bindIp').value,
                 bind_port: parseInt(document.getElementById('bindPort').value),
                 api_key: document.getElementById('apiKey').value,
-                scan_delay_seconds: parseInt(document.getElementById('scanDelaySeconds').value)
+                scan_delay_seconds: parseInt(document.getElementById('scanDelaySeconds').value),
+                entity_id: document.getElementById('entityId').value
             };
 
             try {
-                // Save system configuration (without entity_id)
                 const response = await fetch('/update_config', {
                     method: 'POST',
                     headers: {
@@ -2935,33 +2737,7 @@
 
                 const result = await response.json();
                 if (result.status === 'success') {
-                    // Save entity_id separately using the new API
-                    const entityId = document.getElementById('entityId').value.trim();
-                    if (entityId) {
-                        try {
-                            const entityResponse = await fetch('/save_entity_config', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'X-API-Key': getApiKey()
-                                },
-                                body: JSON.stringify({
-                                    entity_id: entityId
-                                })
-                            });
-                            
-                            const entityResult = await entityResponse.json();
-                            if (entityResult.status === 'success') {
-                                showNotification('System configuration and Entity ID saved successfully!', 'success');
-                            } else {
-                                showNotification(`System config saved, but Entity ID error: ${entityResult.message}`, 'warning');
-                            }
-                        } catch (entityError) {
-                            showNotification(`System config saved, but Entity ID error: ${entityError.message}`, 'warning');
-                        }
-                    } else {
-                        showNotification('System configuration saved successfully!', 'success');
-                    }
+                    showNotification('System configuration updated! Restart required.', 'success');
                 } else {
                     showNotification(`Error: ${result.message}`, 'danger');
                 }
@@ -2969,159 +2745,6 @@
                 showNotification(`Error updating system config: ${error.message}`, 'danger');
             }
         }
-
-        // RTC Configuration Functions
-        async function checkRTCStatus() {
-            try {
-                const response = await fetch('/rtc_status');
-                const status = await response.json();
-                
-                const statusAlert = document.getElementById('rtcStatusAlert');
-                const statusContent = document.getElementById('rtcStatusContent');
-                
-                let statusHtml = `
-                    <div class="row">
-                        <div class="col-md-6">
-                            <strong>RTC Status:</strong> ${status.rtc_available ? '<span class="text-success">Available</span>' : '<span class="text-danger">Not Available</span>'}<br>
-                            <strong>Time Source:</strong> ${status.time_source}<br>
-                            <strong>Current Time:</strong> ${status.current_time}<br>
-                        </div>
-                        <div class="col-md-6">
-                            <strong>I2C Bus:</strong> ${status.i2c_bus}<br>
-                            <strong>I2C Address:</strong> ${status.i2c_address}<br>
-                            <strong>Time Difference:</strong> ${status.time_difference_seconds} seconds<br>
-                        </div>
-                    </div>
-                `;
-                
-                if (status.rtc_time && status.system_time) {
-                    statusHtml += `
-                        <div class="row mt-2">
-                            <div class="col-md-6">
-                                <strong>RTC Time:</strong> ${status.rtc_time}
-                            </div>
-                            <div class="col-md-6">
-                                <strong>System Time:</strong> ${status.system_time}
-                            </div>
-                        </div>
-                    `;
-                }
-                
-                statusContent.innerHTML = statusHtml;
-                statusAlert.style.display = 'block';
-                
-                // Update alert class based on status
-                if (status.rtc_available) {
-                    statusAlert.className = 'alert alert-success';
-                } else {
-                    statusAlert.className = 'alert alert-warning';
-                }
-                
-            } catch (error) {
-                showNotification(`Error checking RTC status: ${error.message}`, 'danger');
-            }
-        }
-
-        async function syncTimeWithRTC() {
-            try {
-                const response = await fetch('/sync_time', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-API-Key': getApiKey()
-                    }
-                });
-
-                const result = await response.json();
-                if (result.status === 'success') {
-                    showNotification('Time synchronized successfully!', 'success');
-                    // Refresh RTC status after sync
-                    setTimeout(checkRTCStatus, 1000);
-                } else {
-                    showNotification(`Error: ${result.message}`, 'danger');
-                }
-            } catch (error) {
-                showNotification(`Error syncing time: ${error.message}`, 'danger');
-            }
-        }
-
-        async function saveRTCConfig() {
-            const config = {
-                rtc_enabled: document.getElementById('rtcEnabled').value === 'true',
-                rtc_i2c_bus: parseInt(document.getElementById('rtcI2CBus').value),
-                rtc_i2c_address: document.getElementById('rtcI2CAddress').value
-            };
-
-            try {
-                const response = await fetch('/update_config', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-API-Key': getApiKey()
-                    },
-                    body: JSON.stringify(config)
-                });
-
-                const result = await response.json();
-                if (result.status === 'success') {
-                    showNotification('RTC configuration updated! Restart required.', 'success');
-                } else {
-                    showNotification(`Error: ${result.message}`, 'danger');
-                }
-            } catch (error) {
-                showNotification(`Error updating RTC config: ${error.message}`, 'danger');
-            }
-        }
-
-        async function debugRTC() {
-            try {
-                const response = await fetch('/rtc_debug', {
-                    headers: {
-                        'X-API-Key': getApiKey()
-                    }
-                });
-                
-                const result = await response.json();
-                
-                if (result.status === 'success') {
-                    // Show debug information in a modal or alert
-                    const debugInfo = result.debug_info;
-                    let debugText = `RTC Debug Information:\n\n`;
-                    debugText += `RTC Status:\n`;
-                    debugText += `- Enabled: ${debugInfo.rtc_status.rtc_enabled}\n`;
-                    debugText += `- Available: ${debugInfo.rtc_status.rtc_available}\n`;
-                    debugText += `- Time Source: ${debugInfo.rtc_status.time_source}\n`;
-                    debugText += `- I2C Bus: ${debugInfo.rtc_status.i2c_bus}\n`;
-                    debugText += `- I2C Address: ${debugInfo.rtc_status.i2c_address}\n\n`;
-                    
-                    debugText += `Environment Variables:\n`;
-                    debugText += `- RTC_ENABLED: ${debugInfo.environment_vars.RTC_ENABLED}\n`;
-                    debugText += `- RTC_I2C_BUS: ${debugInfo.environment_vars.RTC_I2C_BUS}\n`;
-                    debugText += `- RTC_I2C_ADDRESS: ${debugInfo.environment_vars.RTC_I2C_ADDRESS}\n\n`;
-                    
-                    if (debugInfo.i2cdetect_output) {
-                        debugText += `i2cdetect Output:\n`;
-                        debugText += `- Return Code: ${debugInfo.i2cdetect_output.returncode}\n`;
-                        debugText += `- Output: ${debugInfo.i2cdetect_output.stdout}\n`;
-                        if (debugInfo.i2cdetect_output.stderr) {
-                            debugText += `- Error: ${debugInfo.i2cdetect_output.stderr}\n`;
-                        }
-                    }
-                    
-                    if (debugInfo.i2cdetect_error) {
-                        debugText += `i2cdetect Error: ${debugInfo.i2cdetect_error}\n`;
-                    }
-                    
-                    // Show in a modal or alert
-                    alert(debugText);
-                } else {
-                    showNotification(`RTC Debug Error: ${result.message}`, 'danger');
-                }
-            } catch (error) {
-                showNotification(`Error debugging RTC: ${error.message}`, 'danger');
-            }
-        }
-
 
         async function saveWiegandConfig() {
             const config = {
@@ -3167,8 +2790,7 @@
             const token = getAuthToken();
             return {
                 'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                'X-API-Key': getApiKey()
+                'Content-Type': 'application/json'
             };
         }
 
@@ -3391,12 +3013,6 @@
                 updateHealthStatus('camera3', health.camera_3);
                 updateHealthStatus('firebase', health.firebase);
                 
-                // Update temperature status
-                updateTemperatureStatus(health.temperature);
-                
-                // Update RTC status
-                updateRTCStatus(health.rtc);
-                
                 // Also check transaction cache status
                 await checkTransactionCacheStatus();
                 
@@ -3408,8 +3024,6 @@
                 updateHealthStatus('camera2', false);
                 updateHealthStatus('camera3', false);
                 updateHealthStatus('firebase', false);
-                updateTemperatureStatus({ status: 'error' });
-                updateRTCStatus({ available: false });
                 document.getElementById('transactionSyncStatus').textContent = 'Error checking status';
             }
         }
@@ -3478,73 +3092,6 @@
                 icon.className = icon.className.replace(/text-\w+/, 'text-danger');
                 status.className = 'badge bg-danger';
                 status.textContent = 'Offline';
-            }
-        }
-
-        function updateTemperatureStatus(temperature) {
-            const icon = document.getElementById('temperatureIcon');
-            const status = document.getElementById('temperatureStatus');
-            const value = document.getElementById('temperatureValue');
-
-            if (temperature.status === 'error') {
-                icon.className = icon.className.replace(/text-\w+/, 'text-danger');
-                status.textContent = 'Error';
-                status.className = 'badge bg-danger';
-                value.textContent = '--°C';
-            } else {
-                const temp = temperature.temperature_celsius;
-                value.textContent = `${temp}°C`;
-                
-                // Update icon and status based on temperature
-                switch (temperature.status) {
-                    case 'cool':
-                        icon.className = icon.className.replace(/text-\w+/, 'text-info');
-                        status.textContent = 'Cool';
-                        status.className = 'badge bg-info';
-                        break;
-                    case 'normal':
-                        icon.className = icon.className.replace(/text-\w+/, 'text-success');
-                        status.textContent = 'Normal';
-                        status.className = 'badge bg-success';
-                        break;
-                    case 'warm':
-                        icon.className = icon.className.replace(/text-\w+/, 'text-warning');
-                        status.textContent = 'Warm';
-                        status.className = 'badge bg-warning';
-                        break;
-                    case 'hot':
-                        icon.className = icon.className.replace(/text-\w+/, 'text-warning');
-                        status.textContent = 'Hot';
-                        status.className = 'badge bg-warning';
-                        break;
-                    case 'critical':
-                        icon.className = icon.className.replace(/text-\w+/, 'text-danger');
-                        status.textContent = 'Critical';
-                        status.className = 'badge bg-danger';
-                        break;
-                    default:
-                        icon.className = icon.className.replace(/text-\w+/, 'text-secondary');
-                        status.textContent = 'Unknown';
-                        status.className = 'badge bg-secondary';
-                }
-            }
-        }
-
-        function updateRTCStatus(rtc) {
-            const icon = document.getElementById('rtcIcon');
-            const status = document.getElementById('rtcStatus');
-            const timeSource = document.getElementById('rtcTimeSource');
-
-            if (rtc.available) {
-                icon.className = icon.className.replace(/text-\w+/, 'text-success');
-                status.textContent = 'Available';
-                status.className = 'badge bg-success';
-                timeSource.textContent = rtc.time_source || 'RTC';
-            } else {
-                icon.className = icon.className.replace(/text-\w+/, 'text-danger');
-                status.textContent = 'Unavailable';
-                status.className = 'badge bg-danger';
-                timeSource.textContent = 'System';
             }
         }
 

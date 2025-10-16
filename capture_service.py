@@ -8,7 +8,6 @@ import requests
 from typing import Optional
 from config import RTSP_CAMERAS, MAX_RETRIES, RETRY_DELAY
 from uploader import ImageUploader
-from rtc_module import get_accurate_timestamp
 
 class CameraService:
     def __init__(self):
@@ -49,7 +48,7 @@ class CameraService:
                 ret, frame = cap.read()
 
                 if ret:
-                    timestamp = get_accurate_timestamp()
+                    timestamp = int(time.time())
                     filename = f"{timestamp}_{camera_key}.jpg"
                     filepath = os.path.join("images", filename)
                     

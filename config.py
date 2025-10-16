@@ -59,8 +59,3 @@ GPIO_CAMERA_1_PIN = int(os.getenv("GPIO_CAMERA_1_PIN", "18"))  # GPIO pin for ca
 GPIO_CAMERA_2_PIN = int(os.getenv("GPIO_CAMERA_2_PIN", "19"))  # GPIO pin for camera 2 trigger
 GPIO_CAMERA_3_PIN = int(os.getenv("GPIO_CAMERA_3_PIN", "20"))  # GPIO pin for camera 3 trigger
 GPIO_ENABLED = os.getenv("GPIO_ENABLED", "false").lower() == "true"  # Enable GPIO functionality
-
-# DS3232 RTC Configuration
-RTC_ENABLED = os.getenv("RTC_ENABLED", "true").lower() == "true"  # Enable DS3232 RTC module
-RTC_I2C_BUS = int(os.getenv("RTC_I2C_BUS", "1"))  # I2C bus number (usually 1)
-RTC_I2C_ADDRESS = int(os.getenv("RTC_I2C_ADDRESS", "0x68"), 16)  # DS3232 I2C address (0x68)

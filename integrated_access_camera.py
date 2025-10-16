@@ -6,7 +6,7 @@ import sys
 import RPi.GPIO as GPIO
 import firebase_admin
 from firebase_admin import credentials, firestore
-from google.cloud.firestore_v1 import FieldFilter
+from google.cloud.firestore_v1 import FieldFilter, SERVER_TIMESTAMP
 from flask import Flask, request, render_template, jsonify, session, redirect, url_for
 import requests
 import logging
@@ -24,11 +24,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 # Use your config/uploader modules (RTSP cameras, retry configs, S3 API)
 # (These come from your uploaded files.)
-from config import RTSP_CAMERAS, MAX_RETRIES, RETRY_DELAY, RTC_ENABLED, RTC_I2C_BUS, RTC_I2C_ADDRESS  # :contentReference[oaicite:3]{index=3}
+from config import RTSP_CAMERAS, MAX_RETRIES, RETRY_DELAY  # :contentReference[oaicite:3]{index=3}
 from uploader import ImageUploader  # :contentReference[oaicite:4]{index=4}
-
-# DS3232 RTC module for accurate timestamps
-from rtc_module import get_accurate_timestamp, get_accurate_datetime, get_accurate_iso_timestamp, get_rtc_instance
 
 # =========================
 # Environment / Constants
@@ -45,6 +42,9 @@ os.makedirs(IMAGES_DIR, exist_ok=True)
 MAX_STORAGE_GB = int(os.environ.get("MAX_STORAGE_GB", "20"))  # Fallback maximum storage for images (20GB)
 CLEANUP_THRESHOLD_GB = int(os.environ.get("CLEANUP_THRESHOLD_GB", "10"))  # Fallback amount to delete when limit reached (10GB)
 STORAGE_CHECK_INTERVAL = int(os.environ.get("STORAGE_CHECK_INTERVAL", "300"))  # Check storage every 5 minutes
+
+# Transaction Retention Configuration
+TRANSACTION_RETENTION_DAYS = int(os.environ.get("TRANSACTION_RETENTION_DAYS", "120"))  # Keep transactions for 120 days locally
 
 # GPIO Pins for Three Wiegand RFID Readers
 D0_PIN_1 = int(os.environ.get('D0_PIN_1', 18))  # Wiegand Data 0 (Reader 1 - Green)
@@ -65,26 +65,8 @@ USER_DATA_FILE = os.path.join(BASE_DIR, "users.json")
 BLOCKED_USERS_FILE = os.path.join(BASE_DIR, "blocked_users.json")
 TRANSACTION_CACHE_FILE = os.path.join(BASE_DIR, "transactions_cache.json")
 DAILY_STATS_FILE = os.path.join(BASE_DIR, "daily_stats.json")
-ENTITY_CONFIG_FILE = os.path.join(BASE_DIR, "entity_config.json")
-TRANSACTION_RETENTION_DAYS = int(os.environ.get('TRANSACTION_RETENTION_DAYS', '120'))  # Keep transactions for 120 days
 FIREBASE_CRED_FILE = os.environ.get('FIREBASE_CRED_FILE', "service.json")
-
-# Load entity_id from config file or environment variable (simple version for initialization)
-def load_entity_id_simple():
-    """Load entity_id from config file or environment variable (simple version)."""
-    try:
-        if os.path.exists(ENTITY_CONFIG_FILE):
-            with open(ENTITY_CONFIG_FILE, 'r') as f:
-                import json
-                config = json.load(f)
-                return config.get('entity_id', os.environ.get('ENTITY_ID', 'default_entity'))
-        else:
-            return os.environ.get('ENTITY_ID', 'default_entity')
-    except Exception as e:
-        print(f"Error loading entity_id: {e}")
-        return os.environ.get('ENTITY_ID', 'default_entity')
-
-ENTITY_ID = load_entity_id_simple()
+ENTITY_ID = os.environ.get('ENTITY_ID', 'default_entity')
 
 # Ensure base directory exists
 os.makedirs(BASE_DIR, exist_ok=True)
@@ -109,7 +91,7 @@ active_sessions = {}
 
 def cleanup_expired_sessions():
     """Remove expired sessions"""
-    current_time = get_accurate_datetime()
+    current_time = datetime.now()
     expired_tokens = []
     
     for token, session_data in active_sessions.items():
@@ -139,16 +121,6 @@ def daily_stats_cleanup_worker():
             time.sleep(86400)  # Check every 24 hours
         except Exception as e:
             logging.error(f"Daily stats cleanup error: {e}")
-            time.sleep(3600)  # Retry in 1 hour on error
-
-def transaction_cleanup_worker():
-    """Background worker to clean up transactions older than TRANSACTION_RETENTION_DAYS"""
-    while True:
-        try:
-            cleanup_old_transactions()
-            time.sleep(86400)  # Check every 24 hours
-        except Exception as e:
-            logging.error(f"Transaction cleanup error: {e}")
             time.sleep(3600)  # Retry in 1 hour on error
 
 def hash_password(password):
@@ -258,85 +230,6 @@ def is_internet_available():
         time.sleep(2)
     return False
 
-def get_raspberry_pi_temperature():
-    """Get Raspberry Pi CPU temperature in Celsius."""
-    try:
-        # Try to read from thermal zone (most common method)
-        thermal_paths = [
-            "/sys/class/thermal/thermal_zone0/temp",  # Standard Raspberry Pi
-            "/sys/class/thermal/thermal_zone1/temp",  # Alternative thermal zone
-            "/sys/devices/virtual/thermal/thermal_zone0/temp",  # Alternative path
-        ]
-        
-        for thermal_path in thermal_paths:
-            if os.path.exists(thermal_path):
-                try:
-                    with open(thermal_path, 'r') as f:
-                        temp_millicelsius = int(f.read().strip())
-                        temp_celsius = temp_millicelsius / 1000.0
-                        return {
-                            "temperature_celsius": round(temp_celsius, 1),
-                            "temperature_fahrenheit": round((temp_celsius * 9/5) + 32, 1),
-                            "status": get_temperature_status(temp_celsius),
-                            "source": "thermal_zone"
-                        }
-                except (ValueError, IOError) as e:
-                    logging.warning(f"Error reading temperature from {thermal_path}: {e}")
-                    continue
-        
-        # Fallback: Try vcgencmd if available
-        try:
-            import subprocess
-            result = subprocess.run(['vcgencmd', 'measure_temp'], 
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                # Parse output like "temp=45.1'C"
-                temp_str = result.stdout.strip()
-                if "temp=" in temp_str:
-                    temp_celsius = float(temp_str.split('=')[1].replace("'C", ""))
-                    return {
-                        "temperature_celsius": round(temp_celsius, 1),
-                        "temperature_fahrenheit": round((temp_celsius * 9/5) + 32, 1),
-                        "status": get_temperature_status(temp_celsius),
-                        "source": "vcgencmd"
-                    }
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, ValueError) as e:
-            logging.warning(f"Error reading temperature via vcgencmd: {e}")
-        
-        # If all methods fail, return error status
-        return {
-            "temperature_celsius": None,
-            "temperature_fahrenheit": None,
-            "status": "error",
-            "source": "unavailable",
-            "error": "Unable to read temperature from any source"
-        }
-        
-    except Exception as e:
-        logging.error(f"Unexpected error reading Pi temperature: {e}")
-        return {
-            "temperature_celsius": None,
-            "temperature_fahrenheit": None,
-            "status": "error",
-            "source": "unavailable",
-            "error": str(e)
-        }
-
-def get_temperature_status(temp_celsius):
-    """Get temperature status based on Celsius reading."""
-    if temp_celsius is None:
-        return "error"
-    elif temp_celsius < 50:
-        return "cool"
-    elif temp_celsius < 70:
-        return "normal"
-    elif temp_celsius < 80:
-        return "warm"
-    elif temp_celsius < 85:
-        return "hot"
-    else:
-        return "critical"
-
 def atomic_write_json(path, data):
     """Write JSON atomically to avoid corruption."""
     tmp = f"{path}.tmp"
@@ -353,30 +246,6 @@ def read_json_or_default(path, default):
     except Exception as e:
         logging.error(f"Error reading {path}: {e}")
         return default
-
-# Entity ID management functions (defined after utility functions)
-def get_entity_id():
-    """Get entity_id from config file or environment variable."""
-    try:
-        if os.path.exists(ENTITY_CONFIG_FILE):
-            config = read_json_or_default(ENTITY_CONFIG_FILE, {})
-            return config.get('entity_id', os.environ.get('ENTITY_ID', 'default_entity'))
-        else:
-            return os.environ.get('ENTITY_ID', 'default_entity')
-    except Exception as e:
-        logging.error(f"Error loading entity_id: {e}")
-        return os.environ.get('ENTITY_ID', 'default_entity')
-
-def save_entity_id(entity_id):
-    """Save entity_id to config file."""
-    try:
-        config = {"entity_id": entity_id}
-        atomic_write_json(ENTITY_CONFIG_FILE, config)
-        logging.info(f"Entity ID saved: {entity_id}")
-        return True
-    except Exception as e:
-        logging.error(f"Error saving entity_id: {e}")
-        return False
 
 def _ts_to_epoch(ts):
     """Normalize Firestore/epoch timestamps to float epoch seconds."""
@@ -461,71 +330,15 @@ def save_blocked_users(new_blocked):
         _rebuild_blocked_set_from_dict(blocked_users)
 
 def cache_transaction(transaction):
-    """
-    Stores transactions locally for fast access.
-    This is ALWAYS called regardless of internet status for better performance.
-    """
+    """Stores transactions locally when internet is unavailable."""
     txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
     txns.append(transaction)
     atomic_write_json(TRANSACTION_CACHE_FILE, txns)
-    logging.info(f"Transaction cached locally: {transaction.get('card', 'unknown')}")
-
-def mark_transaction_uploaded(timestamp):
-    """Mark a transaction as uploaded to Firestore."""
-    try:
-        txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
-        for tx in txns:
-            if tx.get("timestamp") == timestamp:
-                tx["uploaded_to_firestore"] = True
-                break
-        atomic_write_json(TRANSACTION_CACHE_FILE, txns)
-    except Exception as e:
-        logging.error(f"Error marking transaction as uploaded: {e}")
-
-def cleanup_old_transactions():
-    """
-    Clean up transactions older than TRANSACTION_RETENTION_DAYS from local cache.
-    This keeps the local storage manageable and performant.
-    """
-    try:
-        if not os.path.exists(TRANSACTION_CACHE_FILE):
-            logging.info("No transaction cache file to clean")
-            return 0
-        
-        txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
-        if not txns:
-            logging.info("No transactions to clean")
-            return 0
-        
-        # Calculate cutoff timestamp
-        cutoff_date = get_accurate_datetime() - timedelta(days=TRANSACTION_RETENTION_DAYS)
-        cutoff_timestamp = int(cutoff_date.timestamp())
-        
-        # Filter transactions to keep only those within retention period
-        original_count = len(txns)
-        filtered_txns = [
-            tx for tx in txns 
-            if tx.get("timestamp", 0) >= cutoff_timestamp
-        ]
-        
-        deleted_count = original_count - len(filtered_txns)
-        
-        if deleted_count > 0:
-            atomic_write_json(TRANSACTION_CACHE_FILE, filtered_txns)
-            logging.info(f"Cleaned up {deleted_count} transactions older than {TRANSACTION_RETENTION_DAYS} days. Kept {len(filtered_txns)} transactions.")
-        else:
-            logging.info(f"No transactions older than {TRANSACTION_RETENTION_DAYS} days. All {len(filtered_txns)} transactions retained.")
-        
-        return deleted_count
-        
-    except Exception as e:
-        logging.error(f"Error cleaning up old transactions: {e}")
-        return 0
 
 def update_daily_stats(status):
     """Update daily statistics for access attempts."""
     try:
-        today = get_accurate_datetime().strftime('%Y-%m-%d')
+        today = datetime.now().strftime('%Y-%m-%d')
         stats = read_json_or_default(DAILY_STATS_FILE, {})
         
         if today not in stats:
@@ -555,7 +368,7 @@ def cleanup_old_daily_stats():
     """Remove daily statistics older than 20 days."""
     try:
         stats = read_json_or_default(DAILY_STATS_FILE, {})
-        cutoff_date = get_accurate_datetime() - timedelta(days=20)
+        cutoff_date = datetime.now() - timedelta(days=20)
         cutoff_str = cutoff_date.strftime('%Y-%m-%d')
         
         old_dates = [date for date in stats.keys() if date < cutoff_str]
@@ -575,7 +388,7 @@ def get_daily_stats():
         stats = read_json_or_default(DAILY_STATS_FILE, {})
         
         # Generate last 20 days
-        today = get_accurate_datetime()
+        today = datetime.now()
         last_20_days = []
         
         for i in range(20):
@@ -603,12 +416,12 @@ def get_daily_stats():
 
 def sync_transactions():
     """
-    Syncs cached transactions with Firebase.
-    NOTE: We keep the cache file as it's now our primary local storage.
-    This function only ensures transactions are also in Firestore for backup/analytics.
+    Syncs unsynced transactions with Firebase when internet is restored.
+    Only uploads transactions where synced_to_firestore = False.
+    This prevents duplicate uploads while ensuring all transactions reach Firestore.
     """
     if not os.path.exists(TRANSACTION_CACHE_FILE):
-        logging.info("No transaction cache file to sync")
+        logging.debug("No transaction cache file to sync")
         return
     if not (is_internet_available() and db is not None):
         logging.debug("Cannot sync: No internet or Firebase unavailable")
@@ -617,21 +430,21 @@ def sync_transactions():
     try:
         txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
         if not txns:
-            logging.info("No transactions to sync")
+            logging.debug("No transactions in cache")
             return
 
-        # Filter out transactions that have already been uploaded
-        unsynced_txns = [tx for tx in txns if not tx.get("uploaded_to_firestore", False)]
+        # Filter ONLY transactions that haven't been synced yet
+        unsynced_txns = [tx for tx in txns if not tx.get("synced_to_firestore", False)]
         
         if not unsynced_txns:
-            logging.info("All transactions already synced to Firestore")
+            logging.debug("All transactions already synced to Firestore")
             return
         
-        logging.info(f"Starting sync of {len(unsynced_txns)} unsynced transactions to Firestore...")
+        logging.info(f"Found {len(unsynced_txns)} unsynced transactions to upload")
         
         batch_size = 10
         idx = 0
-        synced = 0
+        synced_count = 0
         failed_count = 0
         
         while idx < len(unsynced_txns):
@@ -643,19 +456,20 @@ def sync_transactions():
                         txn["card"] = txn.get("card_number")
                         txn.pop("card_number", None)
                     
-                    # Add entity_id to transaction data
-                    transaction_data = txn.copy()
-                    transaction_data["entity_id"] = ENTITY_ID
-                    # Remove upload tracking flag
-                    transaction_data.pop("uploaded_to_firestore", None)
+                    # Remove sync flag before uploading (internal use only)
+                    upload_data = {k: v for k, v in txn.items() if k != "synced_to_firestore"}
                     
-                    # Use new structure: transactions/{push-id} -> transaction data
-                    db.collection("transactions").add(transaction_data)
-                    synced += 1
-                    logging.info(f"Synced transaction to Firestore: {txn.get('card', 'unknown')}")
+                    # Add SERVER_TIMESTAMP as "created_at" (only for Firestore, not local cache)
+                    upload_data["created_at"] = SERVER_TIMESTAMP
                     
-                    # Mark as uploaded
-                    mark_transaction_uploaded(txn.get("timestamp"))
+                    # Upload to Firestore (flat structure with entity_id)
+                    db.collection("transactions").add(upload_data)
+                    synced_count += 1
+                    
+                    # Mark as synced in cache
+                    mark_transaction_synced(txn.get("timestamp"))
+                    
+                    logging.info(f"Synced transaction to Firestore: {txn.get('card', 'unknown')} (timestamp: {txn.get('timestamp')})")
                     
                 except google.api_core.exceptions.DeadlineExceeded:
                     logging.warning(f"Firestore timeout during sync for card: {txn.get('card', 'unknown')}")
@@ -665,12 +479,10 @@ def sync_transactions():
                     failed_count += 1
                     
             idx += batch_size
-            time.sleep(1)  # Rate limiting
+            time.sleep(1)  # Rate limiting between batches
         
-        logging.info(f"Sync complete: {synced} synced, {failed_count} failed. Local cache preserved.")
-        
-        # NOTE: We do NOT delete the cache file anymore as it's our primary storage
-        # Transactions remain in local cache for fast access
+        # KEEP the cache file for offline access and dashboard display
+        logging.info(f"Sync complete: {synced_count} uploaded, {failed_count} failed. Local cache preserved.")
             
     except Exception as e:
         logging.error(f"Error syncing transactions: {str(e)}")
@@ -837,6 +649,21 @@ def storage_monitor_worker():
             logging.error(f"Error in storage monitor worker: {e}")
             time.sleep(60)  # Wait 1 minute before retrying
 
+def transaction_cleanup_worker():
+    """
+    Background worker to clean up transactions older than TRANSACTION_RETENTION_DAYS.
+    Runs once per day (24 hours) to keep local cache manageable.
+    """
+    while True:
+        try:
+            deleted_count = cleanup_old_transactions()
+            if deleted_count > 0:
+                logging.info(f"Transaction cleanup worker: Deleted {deleted_count} old transactions")
+            time.sleep(86400)  # Check every 24 hours
+        except Exception as e:
+            logging.error(f"Error in transaction cleanup worker: {e}")
+            time.sleep(3600)  # Retry in 1 hour on error
+
 def _rtsp_capture_single(rtsp_url: str, filepath: str) -> bool:
     """Open RTSP, grab one frame, save JPEG. Retries using MAX_RETRIES/RETRY_DELAY."""
     retries = 0
@@ -872,7 +699,7 @@ def _rtsp_capture_single(rtsp_url: str, filepath: str) -> bool:
 
 def _mark_uploaded(filepath: str, location: str):
     meta = {
-        "uploaded_at": get_accurate_timestamp(),
+        "uploaded_at": int(time.time()),
         "s3_location": location
     }
     try:
@@ -955,7 +782,7 @@ def capture_for_reader_async(reader_id: int, card_int: int, user_name: str = Non
             return
 
         safe = _sanitize_card_number(card_str)
-        ts = get_accurate_timestamp()
+        ts = int(time.time())
         filename = f"{safe}_r{reader_id}_{ts}.jpg"  # format: card_reader_timestamp
         filepath = os.path.join(IMAGES_DIR, filename)
 
@@ -1061,8 +888,8 @@ def login_post():
             token = generate_session_token()
             active_sessions[token] = {
                 'username': username,
-                'login_time': get_accurate_datetime(),
-                'expires': get_accurate_datetime() + timedelta(hours=24)
+                'login_time': datetime.now(),
+                'expires': datetime.now() + timedelta(hours=24)
             }
             
             logging.info(f"User {username} logged in successfully")
@@ -1115,7 +942,7 @@ def change_password():
         
         # Check if session has expired
         session_data = active_sessions[token]
-        if get_accurate_datetime() > session_data['expires']:
+        if datetime.now() > session_data['expires']:
             del active_sessions[token]
             logging.error(f"Session expired for token: {token[:10]}...")
             return jsonify({"status": "error", "message": "Session expired"}), 401
@@ -1175,7 +1002,7 @@ def check_auth():
             return jsonify({"status": "error", "message": "Invalid token"}), 401
         
         session_data = active_sessions[token]
-        if get_accurate_datetime() > session_data['expires']:
+        if datetime.now() > session_data['expires']:
             del active_sessions[token]
             return jsonify({"status": "error", "message": "Session expired"}), 401
         
@@ -1254,7 +1081,7 @@ def system_status():
     try:
         status = {
             "system": "online",
-            "timestamp": get_accurate_iso_timestamp(),
+            "timestamp": datetime.now().isoformat(),
             "components": {
                 "firebase": db is not None,
                 "pigpio": pi is not None and pi.connected if pi else False,
@@ -1279,67 +1106,7 @@ def system_status():
 
         return jsonify(status)
     except Exception as e:
-        return jsonify({"system": "error", "error": str(e), "timestamp": get_accurate_iso_timestamp()}), 500
-
-@app.route("/rtc_status")
-def rtc_status():
-    """Get DS3232 RTC status and information."""
-    try:
-        rtc = get_rtc_instance()
-        status = rtc.get_rtc_status()
-        return jsonify(status)
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e), "timestamp": get_accurate_iso_timestamp()}), 500
-
-@app.route("/temperature")
-def temperature_status():
-    """Get Raspberry Pi temperature information."""
-    try:
-        temperature_info = get_raspberry_pi_temperature()
-        return jsonify({
-            "status": "success",
-            "timestamp": get_accurate_iso_timestamp(),
-            "temperature": temperature_info
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error", 
-            "error": str(e), 
-            "timestamp": get_accurate_iso_timestamp()
-        }), 500
-
-@app.route("/sync_time", methods=["POST"])
-@require_api_key
-def sync_time():
-    """Sync system time with RTC module."""
-    try:
-        rtc = get_rtc_instance()
-        
-        if not rtc.rtc_available:
-            return jsonify({
-                "status": "error", 
-                "message": "RTC module not available"
-            }), 400
-        
-        # Sync RTC from system time (when system time is more accurate)
-        rtc.sync_rtc_from_system()
-        
-        # Get updated status
-        status = rtc.get_rtc_status()
-        
-        return jsonify({
-            "status": "success",
-            "message": "Time synchronized successfully",
-            "rtc_status": status
-        })
-        
-    except Exception as e:
-        logging.error(f"Error syncing time: {e}")
-        return jsonify({
-            "status": "error", 
-            "error": str(e), 
-            "timestamp": get_accurate_iso_timestamp()
-        }), 500
+        return jsonify({"system": "error", "error": str(e), "timestamp": datetime.now().isoformat()}), 500
 
 # --- Users ---
 @app.route("/add_user", methods=["GET"])
@@ -1427,130 +1194,22 @@ def relay():
 # --- Transactions ---
 @app.route("/get_transactions", methods=["GET"])
 def get_transactions():
-    """Fetch today's RFID access transactions with pagination support."""
-    try:
-        # Get pagination parameters
-        page = int(request.args.get('page', 1))
-        per_page = int(request.args.get('per_page', 50))
-        date_filter = request.args.get('date', 'today')  # today, week, month, all
-        
-        transactions = []
-        total_count = 0
-        
-        # Calculate date range
-        now = get_accurate_datetime()
-        if date_filter == 'today':
-            start_of_day = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-            end_of_day = int(now.replace(hour=23, minute=59, second=59, microsecond=999999).timestamp())
-        elif date_filter == 'week':
-            start_of_day = int((now - timedelta(days=7)).timestamp())
-            end_of_day = int(now.timestamp())
-        elif date_filter == 'month':
-            start_of_day = int((now - timedelta(days=30)).timestamp())
-            end_of_day = int(now.timestamp())
-        else:  # all
-            start_of_day = 0
-            end_of_day = int(now.timestamp())
-        
-        # ALWAYS check local cache FIRST (faster, works offline)
-        cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
-        
-        # Filter by date range
-        filtered_cached = [
-            tx for tx in cached 
-            if start_of_day <= tx.get("timestamp", 0) <= end_of_day
-        ]
-        
-        # Sort by timestamp descending
-        filtered_cached.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-        
-        total_count = len(filtered_cached)
-        
-        # Apply pagination
-        start_idx = (page - 1) * per_page
-        end_idx = start_idx + per_page
-        paginated_cached = filtered_cached[start_idx:end_idx]
-        
-        for tx in paginated_cached:
-            transactions.append({
-                "card_number": tx.get("card", "N/A"),
-                "name": tx.get("name", "Unknown"),
-                "status": tx.get("status", "Unknown"),
-                "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
-                "reader": tx.get("reader", "Unknown"),
-                "source": "local_cache"
-            })
-        
-        # If no local transactions and online, try Firestore as fallback
-        if not transactions and db is not None and is_internet_available():
-            try:
-                logging.info("No local transactions found, checking Firestore...")
-                # Get today's transactions with pagination
-                query = db.collection("transactions") \
-                          .where("entity_id", "==", ENTITY_ID) \
-                          .where(filter=FieldFilter("timestamp", ">=", start_of_day)) \
-                          .where(filter=FieldFilter("timestamp", "<=", end_of_day)) \
-                          .order_by("timestamp", direction=firestore.Query.DESCENDING)
-                
-                # Get all matching documents for count
-                all_docs = [d.to_dict() or {} for d in query.stream()]
-                total_count = len(all_docs)
-                
-                # Apply pagination
-                start_idx = (page - 1) * per_page
-                end_idx = start_idx + per_page
-                paginated_docs = all_docs[start_idx:end_idx]
-                
-                for tx in paginated_docs:
-                    transactions.append({
-                        "card_number": tx.get("card", "N/A"),
-                        "name": tx.get("name", "Unknown"),
-                        "status": tx.get("status", "Unknown"),
-                        "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
-                        "reader": tx.get("reader", "Unknown"),
-                        "source": "firestore"
-                    })
-                    
-            except google.api_core.exceptions.DeadlineExceeded:
-                logging.warning("Firestore transaction timeout")
-            except Exception as e:
-                logging.error(f"Firestore get_transactions error: {e}")
-        
-        # Calculate pagination metadata
-        total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
-        
-        return jsonify({
-            "transactions": transactions,
-            "pagination": {
-                "page": page,
-                "per_page": per_page,
-                "total_count": total_count,
-                "total_pages": total_pages,
-                "has_next": page < total_pages,
-                "has_prev": page > 1
-            },
-            "date_filter": date_filter
-        })
-            
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Error fetching transactions: {str(e)}"}), 500
-
-@app.route("/get_recent_transactions", methods=["GET"])
-def get_recent_transactions():
     """
-    Get only the most recent transactions for real-time display.
-    Priority: Local cache (fast) -> Firestore (if no local data)
+    Fetch the latest RFID access transactions.
+    ALWAYS reads from local cache FIRST for speed and offline support.
+    Firestore is only used for backup/analytics.
     """
     try:
         transactions = []
         
-        # ALWAYS check local cache FIRST (faster and always up-to-date)
+        # ALWAYS read from local cache FIRST (fast, offline-capable)
         cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
-        
         if cached:
-            # Get last 10 transactions from cache (most recent first)
-            recent_cached = sorted(cached, key=lambda x: x.get("timestamp", 0), reverse=True)[:10]
+            # Sort by timestamp descending and get last 10
+            sorted_cached = sorted(cached, key=lambda x: x.get("timestamp", 0), reverse=True)
+            recent_cached = sorted_cached[:10]
             
+            # Format consistently
             for tx in recent_cached:
                 transactions.append({
                     "card_number": tx.get("card", "N/A"),
@@ -1558,15 +1217,19 @@ def get_recent_transactions():
                     "status": tx.get("status", "Unknown"),
                     "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
                     "reader": tx.get("reader", "Unknown"),
+                    "entity_id": tx.get("entity_id", ENTITY_ID),
                     "source": "local_cache"
                 })
+            
+            logging.debug(f"Returning {len(transactions)} transactions from local cache")
+            return jsonify(transactions)
         
-        # Fallback to Firestore ONLY if no local cache and online
-        if not transactions and db is not None and is_internet_available():
+        # Fallback to Firestore ONLY if no local cache (should rarely happen)
+        if db is not None and is_internet_available():
             try:
-                logging.info("No local recent transactions, checking Firestore...")
+                logging.info("No local cache, trying Firestore...")
                 docs_iter = db.collection("transactions") \
-                              .where("entity_id", "==", ENTITY_ID) \
+                              .where(filter=FieldFilter("entity_id", "==", ENTITY_ID)) \
                               .order_by("timestamp", direction=firestore.Query.DESCENDING) \
                               .limit(10).stream()
                 
@@ -1578,122 +1241,35 @@ def get_recent_transactions():
                         "status": tx.get("status", "Unknown"),
                         "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
                         "reader": tx.get("reader", "Unknown"),
+                        "entity_id": tx.get("entity_id", "default_entity"),
                         "source": "firestore"
                     })
+                
+                if transactions:
+                    return jsonify(transactions)
+                    
+            except google.api_core.exceptions.DeadlineExceeded:
+                logging.warning("Firestore timeout")
             except Exception as e:
-                logging.error(f"Error fetching from Firestore: {e}")
+                logging.error(f"Firestore error: {e}")
         
-        return jsonify({
-            "status": "success",
-            "transactions": transactions,
-            "count": len(transactions)
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Error fetching recent transactions: {str(e)}"}), 500
-
-# --- Entity Configuration ---
-@app.route("/get_entity_config", methods=["GET"])
-@require_api_key
-def get_entity_config():
-    """Get current entity configuration."""
-    try:
-        return jsonify({
-            "status": "success",
-            "entity_id": get_entity_id(),
-            "config_file_exists": os.path.exists(ENTITY_CONFIG_FILE)
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Error getting entity config: {str(e)}"}), 500
-
-@app.route("/rtc_debug", methods=["GET"])
-@require_api_key
-def rtc_debug():
-    """Debug RTC module status and configuration."""
-    try:
-        rtc = get_rtc_instance()
-        rtc_status = rtc.get_rtc_status()
-        
-        # Add additional debug information
-        debug_info = {
-            "rtc_status": rtc_status,
-            "environment_vars": {
-                "RTC_ENABLED": os.environ.get('RTC_ENABLED', 'not_set'),
-                "RTC_I2C_BUS": os.environ.get('RTC_I2C_BUS', 'not_set'),
-                "RTC_I2C_ADDRESS": os.environ.get('RTC_I2C_ADDRESS', 'not_set')
-            },
-            "config_values": {
-                "RTC_ENABLED": RTC_ENABLED,
-                "RTC_I2C_BUS": RTC_I2C_BUS,
-                "RTC_I2C_ADDRESS": hex(RTC_I2C_ADDRESS)
-            }
-        }
-        
-        # Try to run i2cdetect manually for debugging
-        try:
-            import subprocess
-            result = subprocess.run(
-                ['i2cdetect', '-y', str(RTC_I2C_BUS)],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            debug_info["i2cdetect_output"] = {
-                "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr
-            }
-        except Exception as e:
-            debug_info["i2cdetect_error"] = str(e)
-        
-        return jsonify({
-            "status": "success",
-            "debug_info": debug_info
-        })
+        # No cache and no Firestore data
+        logging.info("No transactions found in cache or Firestore")
+        return jsonify([])
         
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Error getting RTC debug info: {str(e)}"}), 500
-
-@app.route("/save_entity_config", methods=["POST"])
-@require_api_key
-def save_entity_config():
-    """Save entity configuration."""
-    try:
-        data = request.get_json()
-        entity_id = data.get("entity_id", "").strip()
-        
-        if not entity_id:
-            return jsonify({"status": "error", "message": "Entity ID is required"}), 400
-        
-        # Validate entity_id format (alphanumeric, underscore, hyphen only)
-        import re
-        if not re.match(r'^[a-zA-Z0-9_-]+$', entity_id):
-            return jsonify({"status": "error", "message": "Entity ID can only contain letters, numbers, underscores, and hyphens"}), 400
-        
-        if len(entity_id) < 3 or len(entity_id) > 50:
-            return jsonify({"status": "error", "message": "Entity ID must be between 3 and 50 characters"}), 400
-        
-        if save_entity_id(entity_id):
-            # Update global ENTITY_ID
-            global ENTITY_ID
-            ENTITY_ID = entity_id
-            
-            return jsonify({
-                "status": "success", 
-                "message": f"Entity ID updated to: {entity_id}",
-                "entity_id": entity_id
-            })
-        else:
-            return jsonify({"status": "error", "message": "Failed to save entity configuration"}), 500
-            
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Error saving entity config: {str(e)}"}), 500
+        logging.error(f"Error in get_transactions: {e}")
+        return jsonify({"status": "error", "message": f"Error fetching transactions: {str(e)}"}), 500
 
 # --- User Analytics ---
 @app.route("/get_today_stats", methods=["GET"])
 def get_today_stats():
-    """Get today's transaction statistics."""
+    """
+    Get today's transaction statistics.
+    LOCAL-FIRST: Always reads from cache for speed and offline support.
+    """
     try:
-        today = get_accurate_datetime().strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
         stats = {
             "total": 0,
             "granted": 0,
@@ -1701,58 +1277,19 @@ def get_today_stats():
             "blocked": 0
         }
         
-        if db is not None and is_internet_available():
-            try:
-                # Get today's transactions from Firestore
-                start_of_day = int(get_accurate_datetime().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-                end_of_day = int(get_accurate_datetime().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp())
-                
-                docs_iter = db.collection("transactions") \
-                              .where("entity_id", "==", ENTITY_ID) \
-                              .where(filter=FieldFilter("timestamp", ">=", start_of_day)) \
-                              .where(filter=FieldFilter("timestamp", "<=", end_of_day)) \
-                              .order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
-                
-                for doc in docs_iter:
-                    tx = doc.to_dict() or {}
-                    stats["total"] += 1
-                    status = tx.get("status", "").lower()
-                    if "granted" in status:
-                        stats["granted"] += 1
-                    elif "denied" in status:
-                        stats["denied"] += 1
-                    elif "blocked" in status:
-                        stats["blocked"] += 1
-                        
-            except Exception as e:
-                logging.error(f"Error fetching today's stats from Firestore: {e}")
-                # Fallback to cached transactions
-                cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
-                for tx in cached:
-                    tx_date = datetime.fromtimestamp(tx.get("timestamp", 0)).strftime("%Y-%m-%d")
-                    if tx_date == today:
-                        stats["total"] += 1
-                        status = tx.get("status", "").lower()
-                        if "granted" in status:
-                            stats["granted"] += 1
-                        elif "denied" in status:
-                            stats["denied"] += 1
-                        elif "blocked" in status:
-                            stats["blocked"] += 1
-        else:
-            # Use cached transactions when offline
-            cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
-            for tx in cached:
-                tx_date = datetime.fromtimestamp(tx.get("timestamp", 0)).strftime("%Y-%m-%d")
-                if tx_date == today:
-                    stats["total"] += 1
-                    status = tx.get("status", "").lower()
-                    if "granted" in status:
-                        stats["granted"] += 1
-                    elif "denied" in status:
-                        stats["denied"] += 1
-                    elif "blocked" in status:
-                        stats["blocked"] += 1
+        # ALWAYS use cached transactions (fast, offline-capable)
+        cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
+        for tx in cached:
+            tx_date = datetime.fromtimestamp(tx.get("timestamp", 0)).strftime("%Y-%m-%d")
+            if tx_date == today:
+                stats["total"] += 1
+                status = tx.get("status", "").lower()
+                if "granted" in status:
+                    stats["granted"] += 1
+                elif "denied" in status:
+                    stats["denied"] += 1
+                elif "blocked" in status:
+                    stats["blocked"] += 1
         
         return jsonify(stats)
         
@@ -1762,7 +1299,10 @@ def get_today_stats():
 
 @app.route("/search_user_transactions", methods=["GET"])
 def search_user_transactions():
-    """Search transactions by user name."""
+    """
+    Search transactions by user name.
+    LOCAL-FIRST: Always searches local cache for speed and offline support.
+    """
     try:
         user_name = request.args.get("name", "").strip()
         date_range = request.args.get("range", "today")
@@ -1788,62 +1328,23 @@ def search_user_transactions():
             start_time = 0
             end_time = int(now.timestamp())
         
-        if db is not None and is_internet_available():
-            try:
-                # Get all transactions and filter by name (since Firestore doesn't support substring search well)
-                query = db.collection("transactions") \
-                          .where("entity_id", "==", ENTITY_ID) \
-                          .order_by("timestamp", direction=firestore.Query.DESCENDING) \
-                          .limit(500)  # Get more to allow for filtering
-                
-                if date_range != "all":
-                    query = query.where(filter=FieldFilter("timestamp", ">=", start_time))
-                
-                docs_iter = query.stream()
-                
-                for doc in docs_iter:
-                    tx = doc.to_dict() or {}
-                    # Check if name contains the search term (case insensitive)
-                    if user_name.lower() in tx.get("name", "").lower():
-                        if date_range == "all" or start_time <= tx.get("timestamp", 0) <= end_time:
-                            transactions.append({
-                                "card_number": tx.get("card", "N/A"),
-                                "name": tx.get("name", "Unknown"),
-                                "status": tx.get("status", "Unknown"),
-                                "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
-                                "reader": tx.get("reader", "Unknown")
-                            })
-                            # Limit results to 100
-                            if len(transactions) >= 100:
-                                break
-                            
-            except Exception as e:
-                logging.error(f"Error searching transactions in Firestore: {e}")
-                # Fallback to cached transactions
-                cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
-                for tx in cached:
-                    if user_name.lower() in tx.get("name", "").lower():
-                        if date_range == "all" or start_time <= tx.get("timestamp", 0) <= end_time:
-                            transactions.append({
-                                "card_number": tx.get("card_number", tx.get("card", "N/A")),
-                                "name": tx.get("name", "Unknown"),
-                                "status": tx.get("status", "Unknown"),
-                                "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
-                                "reader": tx.get("reader", "Unknown")
-                            })
-        else:
-            # Use cached transactions when offline
-            cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
-            for tx in cached:
-                if user_name.lower() in tx.get("name", "").lower():
-                    if date_range == "all" or start_time <= tx.get("timestamp", 0) <= end_time:
-                        transactions.append({
-                            "card_number": tx.get("card_number", tx.get("card", "N/A")),
-                            "name": tx.get("name", "Unknown"),
-                            "status": tx.get("status", "Unknown"),
-                            "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
-                            "reader": tx.get("reader", "Unknown")
-                        })
+        # ALWAYS search local cache (fast, offline-capable)
+        cached = read_json_or_default(TRANSACTION_CACHE_FILE, [])
+        for tx in cached:
+            if user_name.lower() in tx.get("name", "").lower():
+                if date_range == "all" or start_time <= tx.get("timestamp", 0) <= end_time:
+                    transactions.append({
+                        "card_number": tx.get("card", tx.get("card_number", "N/A")),
+                        "name": tx.get("name", "Unknown"),
+                        "status": tx.get("status", "Unknown"),
+                        "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
+                        "reader": tx.get("reader", "Unknown"),
+                        "entity_id": tx.get("entity_id", ENTITY_ID),
+                        "source": "local_cache"
+                    })
+                    # Limit results to 100
+                    if len(transactions) >= 100:
+                        break
         
         # Sort by timestamp descending
         transactions.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
@@ -1869,7 +1370,7 @@ def test_user_search():
         if db is not None and is_internet_available():
             try:
                 docs_iter = db.collection("transactions") \
-                              .where("entity_id", "==", ENTITY_ID) \
+                              .where(filter=FieldFilter("entity_id", "==", ENTITY_ID)) \
                               .order_by("timestamp", direction=firestore.Query.DESCENDING) \
                               .limit(5).stream()
                 
@@ -1881,7 +1382,8 @@ def test_user_search():
                         "name": tx.get("name", "Unknown"),
                         "status": tx.get("status", "Unknown"),
                         "timestamp": _ts_to_epoch(tx.get("timestamp", None)),
-                        "reader": tx.get("reader", "Unknown")
+                        "reader": tx.get("reader", "Unknown"),
+                        "entity_id": tx.get("entity_id","default_entity")
                     })
                 
                 return jsonify({
@@ -1950,10 +1452,13 @@ def get_photo_preferences():
         return jsonify({"status": "error", "message": f"Error getting preferences: {str(e)}"}), 500
 
 @app.route("/save_global_photo_settings", methods=["POST"])
-@require_api_key
 def save_global_photo_settings():
     """Save global photo settings."""
     try:
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        if token not in active_sessions:
+            return jsonify({"status": "error", "message": "Authentication required"}), 401
+        
         data = request.get_json()
         capture_registered = data.get("capture_registered_vehicles", True)
         
@@ -1979,10 +1484,13 @@ def save_global_photo_settings():
         return jsonify({"status": "error", "message": f"Error saving settings: {str(e)}"}), 500
 
 @app.route("/add_photo_preference", methods=["POST"])
-@require_api_key
 def add_photo_preference():
     """Add a photo preference for a card or user."""
     try:
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        if token not in active_sessions:
+            return jsonify({"status": "error", "message": "Authentication required"}), 401
+        
         data = request.get_json()
         pref_type = data.get("type")  # "card" or "user"
         identifier = data.get("identifier")  # card number or user name
@@ -2043,10 +1551,13 @@ def add_photo_preference():
         return jsonify({"status": "error", "message": f"Error adding preference: {str(e)}"}), 500
 
 @app.route("/remove_photo_preference", methods=["POST"])
-@require_api_key
 def remove_photo_preference():
     """Remove a photo preference for a card or user."""
     try:
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        if token not in active_sessions:
+            return jsonify({"status": "error", "message": "Authentication required"}), 401
+        
         data = request.get_json()
         pref_type = data.get("type")  # "card" or "user"
         identifier = data.get("identifier")  # card number or user name
@@ -2751,8 +2262,8 @@ def get_storage_stats():
 
 @app.route("/cleanup_old_images", methods=["POST"])
 @require_auth
-def cleanup_old_images_api():
-    """Clean up old images based on days to keep (API endpoint)."""
+def cleanup_old_images():
+    """Clean up old images based on days to keep."""
     try:
         data = request.get_json()
         days_to_keep = data.get('days_to_keep', 30)
@@ -2881,38 +2392,41 @@ def manual_sync_transactions():
 
 @app.route("/transaction_cache_status", methods=["GET"])
 def transaction_cache_status():
-    """Get status of cached transactions."""
+    """Get status of cached transactions with retention info."""
     try:
         if not os.path.exists(TRANSACTION_CACHE_FILE):
             return jsonify({
                 "status": "success",
                 "cached_count": 0,
+                "retention_days": TRANSACTION_RETENTION_DAYS,
                 "message": "No cached transactions"
             })
         
         cached_txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
         
-        # Calculate oldest and newest transaction dates
-        oldest_ts = None
-        newest_ts = None
+        # Calculate age statistics
         if cached_txns:
             timestamps = [tx.get("timestamp", 0) for tx in cached_txns]
             oldest_ts = min(timestamps) if timestamps else None
             newest_ts = max(timestamps) if timestamps else None
-        
-        # Calculate days since oldest
-        days_old = None
-        if oldest_ts:
-            age_seconds = get_accurate_timestamp() - oldest_ts
-            days_old = age_seconds // 86400
+            
+            if oldest_ts:
+                age_seconds = int(time.time()) - oldest_ts
+                oldest_age_days = age_seconds // 86400
+            else:
+                oldest_age_days = 0
+        else:
+            oldest_ts = None
+            newest_ts = None
+            oldest_age_days = 0
         
         return jsonify({
             "status": "success",
             "cached_count": len(cached_txns),
+            "retention_days": TRANSACTION_RETENTION_DAYS,
             "oldest_transaction": datetime.fromtimestamp(oldest_ts).isoformat() if oldest_ts else None,
             "newest_transaction": datetime.fromtimestamp(newest_ts).isoformat() if newest_ts else None,
-            "oldest_age_days": int(days_old) if days_old else 0,
-            "days_retention": TRANSACTION_RETENTION_DAYS,
+            "oldest_age_days": int(oldest_age_days),
             "message": f"{len(cached_txns)} transactions cached (retention: {TRANSACTION_RETENTION_DAYS} days)"
         })
         
@@ -3175,29 +2689,12 @@ def system_reset():
 def health_check():
     """Check system health including cameras, internet, and Firebase."""
     try:
-        # Get RTC status
-        rtc = get_rtc_instance()
-        rtc_status = rtc.get_rtc_status()
-        
-        # Debug logging for RTC status
-        logging.info(f"RTC Health Check - Enabled: {rtc_status.get('rtc_enabled')}, Available: {rtc_status.get('rtc_available')}, Time Source: {rtc_status.get('time_source')}")
-        
-        # Get Raspberry Pi temperature
-        temperature_info = get_raspberry_pi_temperature()
-        
         health_status = {
             "internet": False,
             "camera_1": False,
             "camera_2": False,
             "camera_3": False,
-            "firebase": False,
-            "rtc": {
-                "enabled": rtc_status.get("rtc_enabled", False),
-                "available": rtc_status.get("rtc_available", False),
-                "time_source": rtc_status.get("time_source", "System"),
-                "time_difference_seconds": rtc_status.get("time_difference_seconds", 0)
-            },
-            "temperature": temperature_info
+            "firebase": False
         }
         
         # Check internet connectivity
@@ -3284,88 +2781,12 @@ def unblock_user():
         return jsonify({"status": "error", "message": f"Error unblocking user: {str(e)}"}), 500
 
 # =========================
-# Firestore listeners (attach once)
+# NOTE: User management is now handled via Cloudflare API
+# Firestore is ONLY used for:
+# 1. Transaction uploads (backup/analytics)
+# 2. Photo preferences (read-only from Firestore)
+# All user add/block operations done via external API (Cloudflare)
 # =========================
-_listeners = {"users": False, "blocked": False}
-
-def sync_users_from_firebase():
-    """Real-time Firebase updates -> keep users.json and in-memory users fresh."""
-    global _listeners
-    if db is None or _listeners["users"] or not is_internet_available():
-        return
-    try:
-        users_ref = db.collection("users")
-
-        def on_snapshot(col_snapshot, changes, read_time):
-            try:
-                local = load_local_users()
-                changed = False
-                for change in changes:
-                    doc = change.document.to_dict() or {}
-                    if "card_number" not in doc:
-                        doc["card_number"] = change.document.id
-                    card_number = doc["card_number"]
-
-                    if change.type.name in ("ADDED", "MODIFIED"):
-                        local[card_number] = doc
-                        changed = True
-                        logging.info(f"User {doc.get('name', 'Unknown')} (Card: {card_number}) added/updated.")
-                    elif change.type.name == "REMOVED":
-                        if card_number in local:
-                            local.pop(card_number, None)
-                            changed = True
-                            logging.info(f"User with Card {card_number} removed.")
-
-                if changed:
-                    save_local_users(local)  # refresh ALLOWED_SET
-            except Exception as e:
-                logging.error(f"Error in Firebase user snapshot callback: {str(e)}")
-
-        users_ref.on_snapshot(on_snapshot)
-        _listeners["users"] = True
-        logging.info("Listening for real-time Firebase user updates (attached once).")
-    except google.api_core.exceptions.DeadlineExceeded:
-        logging.warning("Firestore transaction timeout during user sync setup")
-    except Exception as e:
-        logging.error(f"Error setting up real-time Firebase sync: {str(e)}")
-
-def sync_blocked_users_from_firebase():
-    """Real-time Firebase updates to blocked flag -> update local blocked_users."""
-    global _listeners
-    if db is None or _listeners["blocked"] or not is_internet_available():
-        return
-    try:
-        blocked_users_ref = db.collection("users")
-
-        def on_snapshot(col_snapshot, changes, read_time):
-            try:
-                local = load_blocked_users()
-                changed = False
-                for change in changes:
-                    doc = change.document.to_dict() or {}
-                    card_number = change.document.id
-                    if "blocked" in doc:
-                        if doc["blocked"]:
-                            if not local.get(card_number):
-                                local[card_number] = True
-                                changed = True
-                                logging.info(f"User {card_number} blocked via Firebase.")
-                        else:
-                            if local.pop(card_number, None) is not None:
-                                changed = True
-                                logging.info(f"User {card_number} unblocked via Firebase.")
-                if changed:
-                    save_blocked_users(local)  # refresh BLOCKED_SET
-            except Exception as e:
-                logging.error(f"Error in Firebase blocked snapshot callback: {str(e)}")
-
-        blocked_users_ref.on_snapshot(on_snapshot)
-        _listeners["blocked"] = True
-        logging.info("Listening for real-time Firebase blocked user updates (attached once).")
-    except google.api_core.exceptions.DeadlineExceeded:
-        logging.warning("Firestore transaction timeout during blocked user sync")
-    except Exception as e:
-        logging.error(f"Error setting up Firebase blocked user sync: {str(e)}")
 
 # =========================
 # Access handling
@@ -3426,7 +2847,7 @@ def handle_access(bits, value, reader_id):
             return
 
         print(f"Scanned Card from Reader {reader_id}: {card_int}")
-        timestamp = get_accurate_timestamp()
+        timestamp = int(time.time())
         if reader_id == 1:
             relay = RELAY_1
         elif reader_id == 2:
@@ -3466,7 +2887,7 @@ def handle_access(bits, value, reader_id):
             "reader": reader_id,
             "status": status,
             "timestamp": timestamp,
-            "uploaded_to_firestore": False  # Track upload status
+            "entity_id": ENTITY_ID
         }
 
         # Update daily statistics
@@ -3485,41 +2906,93 @@ def handle_access(bits, value, reader_id):
         logging.error(f"Unexpected error in handle_access for reader {reader_id}: {str(e)}")
 
 def transaction_uploader():
-    """
-    Background worker to cache and upload transactions.
-    Strategy: ALWAYS cache locally first (fast), then upload to Firestore in background.
-    """
+    """Background worker to upload/cache transactions."""
     while True:
         transaction = transaction_queue.get()
         try:
-            # ALWAYS cache locally first for fast access
+            # Mark as not yet synced to Firestore
+            transaction["synced_to_firestore"] = False
+            
+            # ALWAYS cache locally first for fast offline access and persistence
             cache_transaction(transaction)
             
-            # Then try to upload to Firestore in background
+            # Then try to upload to Firestore if online
             if is_internet_available() and db is not None:
                 try:
-                    # Add entity_id to transaction data
-                    transaction_data = transaction.copy()
-                    transaction_data["entity_id"] = ENTITY_ID
-                    # Remove upload tracking flag before uploading
-                    transaction_data.pop("uploaded_to_firestore", None)
+                    # Firestore path: transactions/{push-id} with entity_id inside document
+                    # Remove sync flag before uploading (internal use only)
+                    upload_data = {k: v for k, v in transaction.items() if k != "synced_to_firestore"}
                     
-                    # Firestore path: transactions/{push-id} -> transaction data
-                    db.collection("transactions").add(transaction_data)
-                    logging.info(f"Transaction uploaded to Firestore with push ID for entity {ENTITY_ID}")
+                    # Add SERVER_TIMESTAMP as "created_at" (only for Firestore, not local cache)
+                    upload_data["created_at"] = SERVER_TIMESTAMP
                     
-                    # Mark transaction as uploaded in cache
-                    mark_transaction_uploaded(transaction.get("timestamp"))
+                    db.collection("transactions").add(upload_data)
+                    logging.info(f"Transaction uploaded to Firestore for entity {ENTITY_ID} (with server timestamp)")
                     
+                    # Mark as synced in cache
+                    mark_transaction_synced(transaction.get("timestamp"))
                 except Exception as e:
-                    logging.error(f"Error uploading transaction to Firestore: {str(e)}")
-                    # Transaction is already cached, so no data loss
+                    logging.error(f"Error uploading transaction: {str(e)}")
+                    # Transaction already cached with synced=False, will retry in sync_transactions()
             else:
-                logging.debug("No internet/Firebase unavailable. Transaction cached locally only.")
+                logging.debug("No internet/Firebase unavailable. Transaction cached locally, will sync when online.")
         except Exception as e:
             logging.error(f"Error in transaction_uploader: {str(e)}")
         finally:
             transaction_queue.task_done()
+
+def mark_transaction_synced(timestamp):
+    """Mark a transaction as synced to Firestore in the cache."""
+    try:
+        txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
+        for tx in txns:
+            if tx.get("timestamp") == timestamp:
+                tx["synced_to_firestore"] = True
+                break
+        atomic_write_json(TRANSACTION_CACHE_FILE, txns)
+        logging.debug(f"Marked transaction {timestamp} as synced")
+    except Exception as e:
+        logging.error(f"Error marking transaction as synced: {e}")
+
+def cleanup_old_transactions():
+    """
+    Clean up transactions older than TRANSACTION_RETENTION_DAYS from local cache.
+    This runs automatically in the background to keep storage manageable.
+    ALL transactions are kept for 120 days regardless of online/offline status.
+    """
+    try:
+        if not os.path.exists(TRANSACTION_CACHE_FILE):
+            logging.debug("No transaction cache file to clean")
+            return 0
+        
+        txns = read_json_or_default(TRANSACTION_CACHE_FILE, [])
+        if not txns:
+            logging.debug("No transactions in cache to clean")
+            return 0
+        
+        # Calculate cutoff timestamp (120 days ago)
+        cutoff_timestamp = int(time.time()) - (TRANSACTION_RETENTION_DAYS * 86400)
+        
+        # Filter transactions to keep only those within retention period
+        original_count = len(txns)
+        filtered_txns = [
+            tx for tx in txns 
+            if tx.get("timestamp", 0) >= cutoff_timestamp
+        ]
+        
+        deleted_count = original_count - len(filtered_txns)
+        
+        if deleted_count > 0:
+            atomic_write_json(TRANSACTION_CACHE_FILE, filtered_txns)
+            logging.info(f"✂️ Cleaned up {deleted_count} transactions older than {TRANSACTION_RETENTION_DAYS} days. Kept {len(filtered_txns)} transactions.")
+        else:
+            logging.debug(f"No transactions older than {TRANSACTION_RETENTION_DAYS} days. All {len(filtered_txns)} transactions retained.")
+        
+        return deleted_count
+        
+    except Exception as e:
+        logging.error(f"Error cleaning up old transactions: {e}")
+        return 0
 
 def upload_single_image(filepath: str):
     """
@@ -3636,43 +3109,24 @@ def check_relay_status():
     except Exception as e:
         logging.error(f"Error fetching relay status from Firebase: {str(e)}")
 
-def check_user_status():
-    """Monitor user control from Firebase."""
-    if db is None:
-        return
-    try:
-        doc = db.collection("user_control").document("status").get()
-        if doc.exists:
-            action = doc.to_dict().get("action", "normal")
-            if action == "updated":
-                try:
-                    sync_users_from_firebase()
-                    db.collection("user_control").document("status").update({"action": "normal"})
-                    logging.info("User data updated from Firebase")
-                except Exception as e:
-                    logging.error(f"Error updating user data: {str(e)}")
-    except google.api_core.exceptions.DeadlineExceeded:
-        logging.warning("Firestore transaction timeout during user status check")
-    except Exception as e:
-        logging.error(f"Error checking user status: {str(e)}")
+# check_user_status() removed - user management now via Cloudflare API
 
 def sync_loop():
-    """Background loop: attach listeners once, poll controls, sync offline txns, and handle image uploads."""
-    # Attach listeners once when online
-    sync_users_from_firebase()
-    sync_blocked_users_from_firebase()
+    """
+    Background loop: Poll relay controls, sync transactions, and handle image uploads.
+    NOTE: User sync removed - managed via Cloudflare API now.
+    """
     while True:
         try:
             if is_internet_available():
                 try:
-                    check_relay_status()
-                    check_user_status()
-                    sync_transactions()
-                    enqueue_pending_images(limit=100)  # opportunistic image uploads - increased batch size
+                    check_relay_status()  # Only relay control kept
+                    sync_transactions()  # Upload transactions to Firestore
+                    enqueue_pending_images(limit=100)  # Upload images to S3
                 except Exception as e:
-                    logging.error(f"Error in Firebase/image sync operations: {str(e)}")
+                    logging.error(f"Error in sync operations: {str(e)}")
             else:
-                logging.debug("No internet connection. Skipping Firebase & image upload sync.")
+                logging.debug("No internet connection. Skipping sync operations.")
             # Use faster sync interval when there are pending uploads
             queue_size = image_queue.qsize()
             if queue_size > 0:
@@ -3761,8 +3215,8 @@ threading.Thread(target=transaction_uploader, daemon=True).start()
 threading.Thread(target=image_uploader_worker, daemon=True).start()
 threading.Thread(target=session_cleanup_worker, daemon=True).start()
 threading.Thread(target=daily_stats_cleanup_worker, daemon=True).start()
-threading.Thread(target=transaction_cleanup_worker, daemon=True).start()
 threading.Thread(target=storage_monitor_worker, daemon=True).start()
+threading.Thread(target=transaction_cleanup_worker, daemon=True).start()  # Auto-cleanup old transactions (120 days)
 
 # Flask serve
 try:
