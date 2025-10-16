@@ -209,26 +209,52 @@ except Exception as e:
 # =========================
 # Utilities
 # =========================
+# Cached internet status to avoid blocking during critical operations
+_internet_status = {"available": False, "last_check": 0}
+_internet_check_lock = threading.Lock()
+INTERNET_CHECK_CACHE_SECONDS = 10  # Cache internet status for 10 seconds
+
 def is_internet_available():
-    """Fast and reliable internet check using 204 endpoints."""
-    retries = int(os.environ.get('INTERNET_CHECK_RETRIES', 3))
-    timeout = int(os.environ.get('INTERNET_CHECK_TIMEOUT', 5))
+    """
+    Fast internet check with caching.
+    Returns cached status if checked within last 10 seconds to avoid blocking.
+    This prevents delays during card scans and image captures.
+    """
+    global _internet_status
+    
+    current_time = time.time()
+    
+    # Use cached status if fresh (within 10 seconds)
+    with _internet_check_lock:
+        if current_time - _internet_status["last_check"] < INTERNET_CHECK_CACHE_SECONDS:
+            return _internet_status["available"]
+    
+    # Perform actual check (only if cache expired)
+    retries = 1  # Reduced from 3 for faster response
+    timeout = 2  # Reduced from 5 for faster response
     urls = [
-        "http://clients3.google.com/generate_204",   # HTTP avoids cert/time issues at boot
-        "https://www.gstatic.com/generate_204",
-        "https://www.google.com/generate_204",
-        "https://cloudflare.com/cdn-cgi/trace",
+        "http://clients3.google.com/generate_204",   # HTTP avoids cert/time issues
     ]
+    
+    is_online = False
     for _ in range(retries):
         for u in urls:
             try:
                 r = requests.get(u, timeout=timeout)
                 if r.status_code in (200, 204):
-                    return True
+                    is_online = True
+                    break
             except requests.RequestException:
                 continue
-        time.sleep(2)
-    return False
+        if is_online:
+            break
+    
+    # Update cache
+    with _internet_check_lock:
+        _internet_status["available"] = is_online
+        _internet_status["last_check"] = current_time
+    
+    return is_online
 
 def atomic_write_json(path, data):
     """Write JSON atomically to avoid corruption."""
@@ -665,36 +691,58 @@ def transaction_cleanup_worker():
             time.sleep(3600)  # Retry in 1 hour on error
 
 def _rtsp_capture_single(rtsp_url: str, filepath: str) -> bool:
-    """Open RTSP, grab one frame, save JPEG. Retries using MAX_RETRIES/RETRY_DELAY."""
+    """
+    Open RTSP, grab one frame, save JPEG. 
+    Optimized for fast failure when camera is offline to avoid blocking.
+    """
+    # Reduce retries for camera capture to avoid long delays
+    MAX_CAMERA_RETRIES = 2  # Fast failure if camera is offline
+    CAMERA_RETRY_DELAY = 1  # Quick retry delay
+    
     retries = 0
-    while retries < MAX_RETRIES:
+    while retries < MAX_CAMERA_RETRIES:
         cap = None
         try:
+            # Set timeout properties BEFORE opening
             cap = cv2.VideoCapture(rtsp_url)
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)  # 3 second connection timeout
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000)  # 3 second read timeout
+            
             if not cap.isOpened():
-                logging.warning(f"RTSP not open. Retry {retries+1}/{MAX_RETRIES} ...")
+                if retries == 0:
+                    logging.warning(f"RTSP camera not reachable, retry {retries+1}/{MAX_CAMERA_RETRIES}")
                 retries += 1
-                time.sleep(RETRY_DELAY)
+                time.sleep(CAMERA_RETRY_DELAY)
                 continue
+                
             ret, frame = cap.read()
             if not ret or frame is None:
-                logging.warning("Failed to read frame. Retrying ...")
+                logging.warning(f"Failed to read frame, retry {retries+1}/{MAX_CAMERA_RETRIES}")
                 retries += 1
-                time.sleep(RETRY_DELAY)
+                time.sleep(CAMERA_RETRY_DELAY)
                 continue
+                
             ok = cv2.imwrite(filepath, frame)
             if ok:
+                logging.debug(f"[CAPTURE] Image saved successfully: {filepath}")
                 return True
-            logging.error(f"Failed to save image to {filepath}")
-            retries += 1
-            time.sleep(RETRY_DELAY)
+            else:
+                logging.error(f"Failed to save image to {filepath}")
+                retries += 1
+                time.sleep(CAMERA_RETRY_DELAY)
+                
         except Exception as e:
             logging.error(f"Capture error: {e}")
             retries += 1
-            time.sleep(RETRY_DELAY)
+            time.sleep(CAMERA_RETRY_DELAY)
         finally:
             if cap is not None:
-                cap.release()
+                try:
+                    cap.release()
+                except:
+                    pass
+    
+    logging.warning(f"[CAPTURE] Failed to capture after {MAX_CAMERA_RETRIES} attempts")
     return False
 
 def _mark_uploaded(filepath: str, location: str):
@@ -795,9 +843,15 @@ def capture_for_reader_async(reader_id: int, card_int: int, user_name: str = Non
         ok = _rtsp_capture_single(rtsp_url, filepath)
         if ok:
             logging.info(f"[CAPTURE] {camera_key}: saved {filepath}")
-            # Do NOT upload here; queue or let the sync loop find it later.
-            # Optionally enqueue now to speed up online uploads:
-            image_queue.put(filepath)
+            # Only queue if online to avoid blocking when offline
+            # sync_loop will handle offline images via enqueue_pending_images()
+            if is_internet_available():
+                try:
+                    image_queue.put(filepath, block=False)  # Non-blocking put
+                except:
+                    logging.debug(f"[CAPTURE] Queue full, sync_loop will pick up {filepath}")
+            else:
+                logging.debug(f"[CAPTURE] Offline - image saved locally, will upload when online")
         else:
             logging.error(f"[CAPTURE] {camera_key}: failed to capture image for card {card_str}")
     except Exception as e:
@@ -2450,6 +2504,79 @@ def manual_cleanup_old_transactions():
     except Exception as e:
         return jsonify({"status": "error", "message": f"Error cleaning up transactions: {str(e)}"}), 500
 
+@app.route("/force_image_upload", methods=["POST"])
+@require_api_key
+def force_image_upload():
+    """
+    Force immediate image upload by refreshing internet cache and enqueuing pending images.
+    Useful when internet is restored and you want immediate upload without waiting.
+    """
+    try:
+        global _internet_status
+        
+        # Force refresh internet cache
+        with _internet_check_lock:
+            _internet_status["last_check"] = 0  # Expire cache
+        
+        # Check internet status (fresh check)
+        is_online = is_internet_available()
+        
+        if not is_online:
+            return jsonify({
+                "status": "error", 
+                "message": "No internet connection detected"
+            }), 400
+        
+        # Scan for pending images
+        enqueue_pending_images(limit=100)
+        
+        # Get queue status
+        queue_size = image_queue.qsize()
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Image upload triggered. {queue_size} images in queue.",
+            "queue_size": queue_size,
+            "internet_available": is_online
+        })
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error forcing image upload: {str(e)}"}), 500
+
+@app.route("/internet_status", methods=["GET"])
+def get_internet_status():
+    """Get current internet status and cache information."""
+    try:
+        global _internet_status
+        
+        with _internet_check_lock:
+            cached_status = _internet_status["available"]
+            last_check = _internet_status["last_check"]
+        
+        current_time = time.time()
+        cache_age = current_time - last_check
+        
+        # Force a fresh check if requested
+        force_check = request.args.get("force", "false").lower() == "true"
+        if force_check:
+            with _internet_check_lock:
+                _internet_status["last_check"] = 0  # Expire cache
+            fresh_status = is_internet_available()
+        else:
+            fresh_status = is_internet_available()  # Uses cache if fresh
+        
+        return jsonify({
+            "status": "success",
+            "internet_available": fresh_status,
+            "cached_status": cached_status,
+            "cache_age_seconds": round(cache_age, 2),
+            "cache_valid": cache_age < INTERNET_CHECK_CACHE_SECONDS,
+            "last_check_time": datetime.fromtimestamp(last_check).isoformat() if last_check > 0 else "Never"
+        })
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error getting internet status: {str(e)}"}), 500
+
 # --- Offline Images Management ---
 @app.route("/get_offline_images", methods=["GET"])
 def get_offline_images():
@@ -3025,14 +3152,16 @@ def image_uploader_worker():
     """
     Background worker to upload images to S3 with NO impact on scan latency.
     Uses ThreadPoolExecutor for parallel uploads and optimized processing.
+    Optimized: When offline, immediately marks task_done to avoid queue blocking.
     """
     while True:
         filepath = image_queue.get()
         try:
             if not is_internet_available():
-                # Requeue later by simply skipping; sync_loop will enqueue again when online
-                time.sleep(2)  # Reduced from 5 to 2 seconds
+                # Immediately mark as done when offline (don't block queue)
+                # sync_loop will re-enqueue pending images when online
                 image_queue.task_done()
+                logging.debug(f"[UPLOAD] Offline - skipping upload, will retry when online")
                 continue
 
             # Use thread pool for parallel uploads
@@ -3060,6 +3189,10 @@ def enqueue_pending_images(limit=100):  # Increased from 50 to 100
     Optimized for faster processing and larger batches.
     """
     try:
+        if not os.path.exists(IMAGES_DIR):
+            logging.debug("Images directory does not exist")
+            return
+            
         count = 0
         pending_files = []
         
@@ -3071,13 +3204,23 @@ def enqueue_pending_images(limit=100):  # Increased from 50 to 100
             if not _has_uploaded_sidecar(fp):
                 pending_files.append(fp)
         
+        if not pending_files:
+            logging.debug("[UPLOAD] No pending images to upload")
+            return
+        
+        logging.info(f"[UPLOAD] Found {len(pending_files)} pending images (will enqueue {min(len(pending_files), limit)})")
+        
         # Sort by modification time (oldest first) for priority upload
         pending_files.sort(key=lambda x: os.path.getmtime(x))
         
         # Enqueue up to limit
         for fp in pending_files[:limit]:
-            image_queue.put(fp)
-            count += 1
+            try:
+                image_queue.put(fp, block=False)  # Non-blocking to avoid issues
+                count += 1
+            except:
+                logging.warning(f"[UPLOAD] Queue full, will retry later")
+                break
             
         if count:
             logging.info(f"[UPLOAD] Enqueued {count} pending images for upload (queue size: {image_queue.qsize()})")
